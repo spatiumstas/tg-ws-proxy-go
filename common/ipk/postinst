@@ -1,0 +1,27 @@
+#!/bin/sh
+set -e
+
+chmod +x /opt/bin/tg-ws-proxy || true
+chmod +x /opt/etc/init.d/S61tg-ws-proxy || true
+
+CONFFILE=/opt/etc/tg-ws-proxy.conf
+INIT_SCRIPT=/opt/etc/init.d/S61tg-ws-proxy
+
+if [ -f "$CONFFILE" ]; then
+	. "$CONFFILE" || true
+	if [ -z "${SECRET:-}" ]; then
+		secret="$(head -c 16 /dev/urandom | xxd -ps 2>/dev/null | tr -d ' \r\n')"
+		if [ "${#secret}" -eq 32 ]; then
+			if grep -Eq '^[[:space:]]*SECRET=' "$CONFFILE"; then
+				sed -i "s|^[[:space:]]*SECRET=.*$|SECRET=$secret|" "$CONFFILE"
+			else
+				printf '\nSECRET=%s\n' "$secret" >> "$CONFFILE"
+			fi
+			echo "Generated SECRET in $CONFFILE"
+		else
+			echo "WARNING: failed to generate SECRET automatically" >&2
+		fi
+	fi
+fi
+
+"$INIT_SCRIPT" restart || true

@@ -1,0 +1,99 @@
+#!/bin/sh
+
+COMMON_FILE=/opt/etc/init.d/tg-ws-proxy-common.sh
+
+if [ ! -f "$COMMON_FILE" ]; then
+  echo "Missing common script: $COMMON_FILE" >&2
+  exit 1
+fi
+
+. "$COMMON_FILE"
+
+start() {
+  [ -x "$BIN" ] || return 1
+  mkdir -p /opt/var/run /opt/var/log
+  if [ -z "$SECRET" ]; then
+    echo "SECRET is empty in $CONFFILE" >&2
+    return 1
+  fi
+  cleanup_stale_pid
+  if is_running; then
+    echo "tg-ws-proxy already running"
+    return 0
+  fi
+  if [ "$LOG_LEVEL" = "1" ]; then
+	"$BIN" --host "$HOST" --port "$PORT" --secret "$SECRET" --dc-ip-default "$DC_IP_DEFAULT" --dc-ip-default-pool "$DC_IP_DEFAULT_POOL" $EXTRA_ARGS >>"$LOGFILE" 2>&1 &
+  else
+	"$BIN" --host "$HOST" --port "$PORT" --secret "$SECRET" --dc-ip-default "$DC_IP_DEFAULT" --dc-ip-default-pool "$DC_IP_DEFAULT_POOL" $EXTRA_ARGS >/dev/null 2>&1 &
+  fi
+  echo $! > "$PIDFILE"
+
+  i=0
+  while [ "$i" -lt 5 ]; do
+    if is_running; then
+      echo "tg-ws-proxy started"
+      print_connect_link || true
+      return 0
+    fi
+    i=$((i + 1))
+    sleep 1
+  done
+
+  echo "tg-ws-proxy failed to start" >&2
+  cleanup_stale_pid
+  if [ -f "$LOGFILE" ]; then
+    tail -n 20 "$LOGFILE" >&2 || true
+  fi
+  return 1
+}
+
+stop() {
+  cleanup_stale_pid
+  if ! is_running; then
+    echo "tg-ws-proxy is not running"
+    return 0
+  fi
+
+  pid="$(get_pid)"
+  kill "$pid" 2>/dev/null || true
+
+  i=0
+  while [ "$i" -lt 5 ]; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      rm -f "$PIDFILE"
+      echo "tg-ws-proxy stopped"
+      return 0
+    fi
+    i=$((i + 1))
+    sleep 1
+  done
+
+  kill -9 "$pid" 2>/dev/null || true
+  rm -f "$PIDFILE"
+  echo "tg-ws-proxy force stopped"
+  return 0
+}
+
+status() {
+  cleanup_stale_pid
+  if is_running; then
+    echo "tg-ws-proxy is running (pid $(get_pid))"
+    print_connect_link || true
+    return 0
+  fi
+  echo "tg-ws-proxy is not running"
+  return 1
+}
+
+restart() {
+  stop
+  start
+}
+
+case "$1" in
+  start) start ;;
+  stop) stop ;;
+  restart) restart ;;
+  status) status ;;
+  *) echo "Usage: $0 {start|stop|restart|status}"; exit 1 ;;
+esac

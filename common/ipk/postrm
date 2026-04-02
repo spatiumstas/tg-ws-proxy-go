@@ -1,0 +1,9 @@
+#!/bin/sh
+set -e
+
+[ "${PKG_UPGRADE}" = "1" ] && exit 0
+
+rm -f /opt/bin/tg-ws-proxy
+rm -f /opt/etc/init.d/S61tg-ws-proxy
+
+echo "tg-ws-proxy removed"
