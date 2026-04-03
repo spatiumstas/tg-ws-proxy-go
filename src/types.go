@@ -14,6 +14,7 @@ type Config struct {
 	Verbose     bool
 	BufKB       int
 	PoolSize    int
+	MaxConns    int
 	LogFile     string
 	LogMaxMB    float64
 	LogBackups  int

@@ -53,15 +53,42 @@ func main() {
 	defer ln.Close()
 
 	secret, _ := hex.DecodeString(cfg.SecretHex)
+	sessionsSem := make(chan struct{}, cfg.MaxConns)
+
+	acceptBackoff := acceptBackoffMin
+	tcpLn, _ := ln.(*net.TCPListener)
 
 	for {
+		if tcpLn != nil {
+			_ = tcpLn.SetDeadline(time.Now().Add(acceptPollTimeout))
+		}
 		c, err := ln.Accept()
 		if err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				acceptBackoff = acceptBackoffMin
+				continue
+			}
 			log.Printf("WARN   accept error: %v", err)
+			time.Sleep(acceptBackoff)
+			acceptBackoff *= 2
+			if acceptBackoff > acceptBackoffMax {
+				acceptBackoff = acceptBackoffMax
+			}
 			continue
 		}
+		acceptBackoff = acceptBackoffMin
 		atomic.AddInt64(&stats.connectionsTotal, 1)
-		go handleClient(c, cfg, secret)
+
+		select {
+		case sessionsSem <- struct{}{}:
+			go func(conn net.Conn) {
+				defer func() { <-sessionsSem }()
+				handleClient(conn, cfg, secret)
+			}(c)
+		default:
+			log.Printf("WARN   max concurrent sessions reached (%d), dropping %s", cfg.MaxConns, c.RemoteAddr())
+			_ = c.Close()
+		}
 	}
 }
 
@@ -131,29 +158,16 @@ func handleClient(client net.Conn, cfg *Config, secret []byte) {
 	}
 	domains := wsDomains(dcW, hi.IsMedia)
 	key := dcKey{DC: hi.DC, IsMedia: hi.IsMedia}
-
-	var ws *websocket.Conn
-	if pooled := pool.get(cfg, key, primaryTarget, domains, &stats); pooled != nil {
-		ws = pooled
-		log.Printf("INFO   [%s] DC%d%s -> pool hit via %s", label, hi.DC, mediaTag, primaryTarget)
-	}
-
-	if ws == nil {
-		timeout := 10 * time.Second
-		if inCooldown(key) {
-			timeout = 2 * time.Second
-		}
+	connectWS := func(timeout time.Duration) (*websocket.Conn, bool, bool) {
 		wsFailedRedirect := false
 		allRedirect := true
-
 		for _, target := range targets {
 			for _, d := range domains {
-				log.Printf("INFO   [%s] DC%d%s -> wss://%s/apiws via %s", label, hi.DC, mediaTag, d, target)
+				debugf(cfg, "[%s] DC%d%s -> wss://%s/apiws via %s", label, hi.DC, mediaTag, d, target)
 				conn, resp, err := wsConnect(target, []string{d}, timeout)
 				if err == nil {
-					ws = conn
 					allRedirect = false
-					break
+					return conn, wsFailedRedirect, allRedirect
 				}
 				atomic.AddInt64(&stats.wsErrors, 1)
 				if resp != nil && isRedirect(resp.StatusCode) {
@@ -164,33 +178,49 @@ func handleClient(client net.Conn, cfg *Config, secret []byte) {
 				allRedirect = false
 				warnf("[%s] DC%d%s WS connect failed via %s: %v", label, hi.DC, mediaTag, target, err)
 			}
-			if ws != nil {
-				break
-			}
 		}
-
-		if ws == nil {
-			if wsFailedRedirect && allRedirect {
-				setBlacklisted(key)
-				warnf("[%s] DC%d%s blacklisted for WS (all redirects)", label, hi.DC, mediaTag)
-			} else {
-				setCooldown(key)
-			}
-			fallback := fallbackIP(hi.DC)
-			if fallback == "" {
-				fallback = primaryTarget
-			}
-			log.Printf("INFO   [%s] DC%d%s -> TCP fallback to %s:443", label, hi.DC, mediaTag, fallback)
-			ok := tcpFallback(client, fallback, relayInit, cltDec, cltEnc, tgEnc, tgDec)
-			if ok == nil {
-				log.Printf("INFO   [%s] DC%d%s TCP fallback closed", label, hi.DC, mediaTag)
-			}
-			return
+		return nil, wsFailedRedirect, allRedirect
+	}
+	fallbackToTCP := func(wsFailedRedirect, allRedirect bool) {
+		if wsFailedRedirect && allRedirect {
+			setBlacklisted(key)
+			warnf("[%s] DC%d%s blacklisted for WS (all redirects)", label, hi.DC, mediaTag)
+		} else {
+			setCooldown(key)
+		}
+		fallback := fallbackIP(hi.DC)
+		if fallback == "" {
+			fallback = primaryTarget
+		}
+		log.Printf("INFO   [%s] DC%d%s -> TCP fallback to %s:443", label, hi.DC, mediaTag, fallback)
+		err := tcpFallback(client, fallback, relayInit, cltDec, cltEnc, tgEnc, tgDec)
+		if err == nil {
+			log.Printf("INFO   [%s] DC%d%s TCP fallback closed", label, hi.DC, mediaTag)
 		}
 	}
 
-	clearCooldown(key)
-	atomic.AddInt64(&stats.connectionsWS, 1)
+	var ws *websocket.Conn
+	fromPool := false
+	if pooled := pool.get(cfg, key, primaryTarget, domains, &stats); pooled != nil {
+		ws = pooled
+		fromPool = true
+		log.Printf("INFO   [%s] DC%d%s -> pool hit via %s", label, hi.DC, mediaTag, primaryTarget)
+	}
+
+	if ws == nil {
+		timeout := 10 * time.Second
+		if inCooldown(key) {
+			timeout = 2 * time.Second
+		}
+		wsFailedRedirect := false
+		allRedirect := true
+		ws, wsFailedRedirect, allRedirect = connectWS(timeout)
+
+		if ws == nil {
+			fallbackToTCP(wsFailedRedirect, allRedirect)
+			return
+		}
+	}
 
 	var splitter *msgSplitter
 	if ms, err := newMsgSplitter(relayInit, protoInt); err == nil {
@@ -200,8 +230,34 @@ func handleClient(client net.Conn, cfg *Config, secret []byte) {
 	if err := ws.WriteMessage(websocket.BinaryMessage, relayInit); err != nil {
 		warnf("[%s] ws init write failed: %v", label, err)
 		_ = ws.Close()
-		return
+		if !fromPool {
+			setCooldown(key)
+			fallbackToTCP(false, false)
+			return
+		}
+
+		timeout := 10 * time.Second
+		if inCooldown(key) {
+			timeout = 2 * time.Second
+		}
+		wsFailedRedirect := false
+		allRedirect := true
+		ws, wsFailedRedirect, allRedirect = connectWS(timeout)
+		if ws == nil {
+			fallbackToTCP(wsFailedRedirect, allRedirect)
+			return
+		}
+		if err := ws.WriteMessage(websocket.BinaryMessage, relayInit); err != nil {
+			warnf("[%s] ws init write failed after pool retry: %v", label, err)
+			_ = ws.Close()
+			setCooldown(key)
+			fallbackToTCP(false, false)
+			return
+		}
 	}
+
+	clearCooldown(key)
+	atomic.AddInt64(&stats.connectionsWS, 1)
 
 	bridgeWS(label, hi.DC, hi.IsMedia, client, ws, cltDec, cltEnc, tgEnc, tgDec, splitter)
 }

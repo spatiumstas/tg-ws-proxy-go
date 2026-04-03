@@ -17,6 +17,13 @@ const (
 
 	wsPoolMaxAge   = 120 * time.Second
 	dcFailCooldown = 30 * time.Second
+	ioIdleTimeout  = 90 * time.Second
+	wsWriteTimeout = 15 * time.Second
+	statsFlushBytes = 256 * 1024
+	acceptPollTimeout = 1 * time.Second
+	acceptBackoffMin  = 5 * time.Millisecond
+	acceptBackoffMax  = 1 * time.Second
+	defaultMaxConns   = 1024
 )
 
 var (
@@ -34,7 +41,7 @@ var (
 		{0x16, 0x03, 0x01, 0x02},
 	}
 
-	dcDefaults = map[int]string{
+	dcFallbackDefaults = map[int]string{
 		1:   "149.154.175.50",
 		2:   "149.154.167.51",
 		3:   "149.154.175.100",

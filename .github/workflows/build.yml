@@ -1,7 +1,10 @@
 name: Build tg-ws-proxy
 
 on:
-  push:
+  workflow_dispatch:
+  release:
+    types:
+      - created
 
 permissions:
   contents: write
@@ -13,20 +16,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - arch: x64
-            pkg_arch: x64
-            goarch: amd64
-            goarm: ""
-            gomips: ""
           - arch: aarch64
             pkg_arch: aarch64-3.10
             goarch: arm64
             goarm: ""
-            gomips: ""
-          - arch: armv7
-            pkg_arch: armv7-3.2
-            goarch: arm
-            goarm: "7"
             gomips: ""
           - arch: mipsel
             pkg_arch: mipsel-3.4

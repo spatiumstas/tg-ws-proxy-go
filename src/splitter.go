@@ -34,10 +34,10 @@ func (m *msgSplitter) split(chunk []byte) [][]byte {
 		return [][]byte{chunk}
 	}
 
-	plain := make([]byte, len(chunk))
-	m.dec.XORKeyStream(plain, chunk)
 	m.cipherBuf = append(m.cipherBuf, chunk...)
-	m.plainBuf = append(m.plainBuf, plain...)
+	plainStart := len(m.plainBuf)
+	m.plainBuf = append(m.plainBuf, make([]byte, len(chunk))...)
+	m.dec.XORKeyStream(m.plainBuf[plainStart:], chunk)
 
 	parts := make([][]byte, 0, 2)
 	for len(m.cipherBuf) > 0 {
@@ -46,13 +46,13 @@ func (m *msgSplitter) split(chunk []byte) [][]byte {
 			break
 		}
 		if next == 0 {
-			parts = append(parts, append([]byte(nil), m.cipherBuf...))
+			parts = append(parts, m.cipherBuf)
 			m.cipherBuf = m.cipherBuf[:0]
 			m.plainBuf = m.plainBuf[:0]
 			m.disabled = true
 			break
 		}
-		parts = append(parts, append([]byte(nil), m.cipherBuf[:next]...))
+		parts = append(parts, m.cipherBuf[:next])
 		m.cipherBuf = m.cipherBuf[next:]
 		m.plainBuf = m.plainBuf[next:]
 	}
@@ -63,7 +63,7 @@ func (m *msgSplitter) flush() [][]byte {
 	if len(m.cipherBuf) == 0 {
 		return nil
 	}
-	tail := append([]byte(nil), m.cipherBuf...)
+	tail := m.cipherBuf
 	m.cipherBuf = m.cipherBuf[:0]
 	m.plainBuf = m.plainBuf[:0]
 	return [][]byte{tail}

@@ -12,8 +12,16 @@ fi
 start() {
   [ -x "$BIN" ] || return 1
   mkdir -p /opt/var/run /opt/var/log
+  if [ ! -f "$CONFFILE" ]; then
+    echo "Config file not found: $CONFFILE" >&2
+    return 1
+  fi
   if [ -z "$SECRET" ]; then
     echo "SECRET is empty in $CONFFILE" >&2
+    return 1
+  fi
+  if [ -z "$DC_IP_DEFAULT" ]; then
+    echo "DC_IP_DEFAULT is empty in $CONFFILE" >&2
     return 1
   fi
   cleanup_stale_pid

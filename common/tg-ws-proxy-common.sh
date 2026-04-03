@@ -6,8 +6,6 @@ PIDFILE=/opt/var/run/tg-ws-proxy.pid
 LOGFILE=/opt/var/log/tg-ws-proxy.log
 BIN=/opt/bin/tg-ws-proxy
 CONFFILE=/opt/etc/tg-ws-proxy.conf
-DC_IP_DEFAULT=149.154.167.220
-DC_IP_DEFAULT_POOL=
 
 if [ -f "$CONFFILE" ]; then
   . "$CONFFILE"

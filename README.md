@@ -1,4 +1,4 @@
-# TG WS Proxy Go
+# TG WS Proxy Go (KeeneticOS)
 
 ### Install
 
@@ -34,14 +34,14 @@ EXTRA_ARGS=""
 > Notes:
 
 1. `SECRET` must be 32 hex chars. If empty, it is auto-generated during install.
-2. `DC_IP_DEFAULT` and `DC_IP_DEFAULT_POOL` are global defaults for implicit DC map (`1,2,3,4,5,203`).
+2. `DC_IP_DEFAULT` and `DC_IP_DEFAULT_POOL` are global defaults for implicit DC map (`2,4`).
 3. `EXTRA_ARGS` is for per-DC overrides and extra runtime flags.
 
 Override examples:
 
 ```conf
-# Per-DC pool override (DC1)
-EXTRA_ARGS="--dc-ip-pool 1:149.154.175.50,149.154.167.220"
+# Per-DC pool override (DC2)
+EXTRA_ARGS="--dc-ip-pool 2:149.154.175.50,149.154.167.220"
 
 # Per-DC single IP override (DC203) + verbose logs
 EXTRA_ARGS="--dc-ip 203:91.105.192.100 -v"
@@ -70,7 +70,7 @@ If `LOG_LEVEL=1`, service logs are written to:
 opkg remove tg-ws-proxy
 ```
 
-### Remove repository
+### Remove repository 
 ```shell
 rm /opt/etc/opkg/feedly.conf
 ```

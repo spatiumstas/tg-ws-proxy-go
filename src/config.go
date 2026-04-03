@@ -22,8 +22,9 @@ func parseFlags() (*Config, error) {
 	logBackups := flag.Int("log-backups", 0, "Number of rotated backups")
 	bufKB := flag.Int("buf-kb", 256, "Socket buffer size in KB")
 	poolSize := flag.Int("pool-size", 4, "WS pool size per DC")
-	dcIPDefault := flag.String("dc-ip-default", "149.154.167.220", "Default target IP for all implicit DCs when --dc-ip is not provided")
-	dcIPDefaultPool := flag.String("dc-ip-default-pool", "", "Default target IP pool for implicit DCs, comma-separated")
+	maxConns := flag.Int("max-conns", defaultMaxConns, "Max concurrent client sessions")
+	dcIPDefault := flag.String("dc-ip-default", "149.154.167.220", "Default WS target IP for all implicit DCs when --dc-ip is not provided")
+	dcIPDefaultPool := flag.String("dc-ip-default-pool", "", "Default WS target IP pool for implicit DCs, comma-separated")
 	pprofListen := flag.String("pprof-listen", "", "Optional pprof listen address (e.g. 127.0.0.1:6060)")
 
 	var dcIPs multiFlag
@@ -63,7 +64,7 @@ func parseFlags() (*Config, error) {
 
 	dcMap := map[int]string{}
 	dcPool := map[int][]string{}
-	for _, dc := range []int{1, 2, 3, 4, 5, 203} {
+	for _, dc := range []int{2, 4} {
 		dcPool[dc] = append([]string(nil), defaultPool...)
 		dcMap[dc] = defaultPool[0]
 	}
@@ -111,6 +112,7 @@ func parseFlags() (*Config, error) {
 		Verbose:     *verbose,
 		BufKB:       maxInt(*bufKB, 4),
 		PoolSize:    maxInt(*poolSize, 0),
+		MaxConns:    maxInt(*maxConns, 1),
 		LogFile:     *logFile,
 		LogMaxMB:    *logMaxMB,
 		LogBackups:  maxInt(*logBackups, 0),

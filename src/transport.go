@@ -7,11 +7,18 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
+
+var ioBufPool = sync.Pool{
+	New: func() any {
+		return make([]byte, 64*1024)
+	},
+}
 
 func dialWS(targetIP, domain string, timeout time.Duration) (*websocket.Conn, *http.Response, error) {
 	u := url.URL{Scheme: "wss", Host: domain, Path: "/apiws"}
@@ -47,13 +54,25 @@ func bridgeWS(label string, dc int, isMedia bool, client net.Conn, ws *websocket
 
 	go func() {
 		defer func() { done <- struct{}{} }()
-		buf := make([]byte, 64*1024)
+		buf := ioBufPool.Get().([]byte)
+		defer ioBufPool.Put(buf)
+		var upPending int64
+		defer func() {
+			if upPending > 0 {
+				atomic.AddInt64(&stats.bytesUp, upPending)
+			}
+		}()
 		for {
+			_ = client.SetReadDeadline(time.Now().Add(ioIdleTimeout))
 			n, err := client.Read(buf)
 			if n > 0 {
-				atomic.AddInt64(&stats.bytesUp, int64(n))
+				upPending += int64(n)
 				upBytes += int64(n)
 				upPkts++
+				if upPending >= statsFlushBytes {
+					atomic.AddInt64(&stats.bytesUp, upPending)
+					upPending = 0
+				}
 				chunk := buf[:n]
 				cltDec.XORKeyStream(chunk, chunk)
 				tgEnc.XORKeyStream(chunk, chunk)
@@ -64,11 +83,13 @@ func bridgeWS(label string, dc int, isMedia bool, client net.Conn, ws *websocket
 						continue
 					}
 					for _, p := range parts {
+						_ = ws.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
 						if werr := ws.WriteMessage(websocket.BinaryMessage, p); werr != nil {
 							return
 						}
 					}
 				} else {
+					_ = ws.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
 					if werr := ws.WriteMessage(websocket.BinaryMessage, chunk); werr != nil {
 						return
 					}
@@ -77,6 +98,7 @@ func bridgeWS(label string, dc int, isMedia bool, client net.Conn, ws *websocket
 			if err != nil {
 				if splitter != nil {
 					for _, p := range splitter.flush() {
+						_ = ws.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
 						_ = ws.WriteMessage(websocket.BinaryMessage, p)
 					}
 				}
@@ -87,7 +109,14 @@ func bridgeWS(label string, dc int, isMedia bool, client net.Conn, ws *websocket
 
 	go func() {
 		defer func() { done <- struct{}{} }()
+		var downPending int64
+		defer func() {
+			if downPending > 0 {
+				atomic.AddInt64(&stats.bytesDown, downPending)
+			}
+		}()
 		for {
+			_ = ws.SetReadDeadline(time.Now().Add(ioIdleTimeout))
 			mt, data, err := ws.ReadMessage()
 			if err != nil {
 				return
@@ -95,12 +124,18 @@ func bridgeWS(label string, dc int, isMedia bool, client net.Conn, ws *websocket
 			if mt != websocket.BinaryMessage {
 				continue
 			}
-			atomic.AddInt64(&stats.bytesDown, int64(len(data)))
-			downBytes += int64(len(data))
+			n := int64(len(data))
+			downPending += n
+			downBytes += n
 			downPkts++
+			if downPending >= statsFlushBytes {
+				atomic.AddInt64(&stats.bytesDown, downPending)
+				downPending = 0
+			}
 
 			tgDec.XORKeyStream(data, data)
 			cltEnc.XORKeyStream(data, data)
+			_ = client.SetWriteDeadline(time.Now().Add(ioIdleTimeout))
 			if _, werr := client.Write(data); werr != nil {
 				return
 			}
@@ -138,14 +173,27 @@ func tcpFallback(client net.Conn, dst string, relayInit []byte, cltDec, cltEnc, 
 	done := make(chan struct{}, 2)
 	go func() {
 		defer func() { done <- struct{}{} }()
-		buf := make([]byte, 64*1024)
+		buf := ioBufPool.Get().([]byte)
+		defer ioBufPool.Put(buf)
+		var upPending int64
+		defer func() {
+			if upPending > 0 {
+				atomic.AddInt64(&stats.bytesUp, upPending)
+			}
+		}()
 		for {
+			_ = client.SetReadDeadline(time.Now().Add(ioIdleTimeout))
 			n, err := client.Read(buf)
 			if n > 0 {
-				atomic.AddInt64(&stats.bytesUp, int64(n))
+				upPending += int64(n)
+				if upPending >= statsFlushBytes {
+					atomic.AddInt64(&stats.bytesUp, upPending)
+					upPending = 0
+				}
 				chunk := buf[:n]
 				cltDec.XORKeyStream(chunk, chunk)
 				tgEnc.XORKeyStream(chunk, chunk)
+				_ = r.SetWriteDeadline(time.Now().Add(ioIdleTimeout))
 				if _, werr := r.Write(chunk); werr != nil {
 					return
 				}
@@ -158,14 +206,27 @@ func tcpFallback(client net.Conn, dst string, relayInit []byte, cltDec, cltEnc, 
 
 	go func() {
 		defer func() { done <- struct{}{} }()
-		buf := make([]byte, 64*1024)
+		buf := ioBufPool.Get().([]byte)
+		defer ioBufPool.Put(buf)
+		var downPending int64
+		defer func() {
+			if downPending > 0 {
+				atomic.AddInt64(&stats.bytesDown, downPending)
+			}
+		}()
 		for {
+			_ = r.SetReadDeadline(time.Now().Add(ioIdleTimeout))
 			n, err := r.Read(buf)
 			if n > 0 {
-				atomic.AddInt64(&stats.bytesDown, int64(n))
+				downPending += int64(n)
+				if downPending >= statsFlushBytes {
+					atomic.AddInt64(&stats.bytesDown, downPending)
+					downPending = 0
+				}
 				chunk := buf[:n]
 				tgDec.XORKeyStream(chunk, chunk)
 				cltEnc.XORKeyStream(chunk, chunk)
+				_ = client.SetWriteDeadline(time.Now().Add(ioIdleTimeout))
 				if _, werr := client.Write(chunk); werr != nil {
 					return
 				}

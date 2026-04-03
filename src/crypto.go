@@ -181,7 +181,7 @@ func signedDC(dc int, media bool) int16 {
 }
 
 func fallbackIP(dc int) string {
-	if ip, ok := dcDefaults[dc]; ok {
+	if ip, ok := dcFallbackDefaults[dc]; ok {
 		return ip
 	}
 	return ""
