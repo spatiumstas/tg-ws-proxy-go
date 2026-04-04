@@ -9,6 +9,7 @@ type Config struct {
 	Host        string
 	Port        int
 	SecretHex   string
+	GenSecret   bool
 	DCMap       map[int]string
 	DCPool      map[int][]string
 	Verbose     bool

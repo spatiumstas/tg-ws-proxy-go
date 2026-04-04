@@ -1,0 +1,123 @@
+#!/bin/sh
+
+ENABLED=yes
+PROCS=tg-ws-proxy
+DESC="TG WS Proxy"
+PATH=/opt/sbin:/opt/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+ACTION=$1
+CALLER=$2
+
+PROG=/opt/bin/tg-ws-proxy
+CONFFILE=/opt/etc/tg-ws-proxy.conf
+LOGFILE=/opt/var/log/tg-ws-proxy.log
+
+ansi_red="\033[1;31m";
+ansi_white="\033[1;37m";
+ansi_green="\033[1;32m";
+ansi_yellow="\033[1;33m";
+ansi_blue="\033[1;34m";
+ansi_std="\033[m";
+
+load_config() {
+  if [ ! -f "$CONFFILE" ]; then
+    echo "Config file not found: $CONFFILE" >&2
+    return 1
+  fi
+
+  . "$CONFFILE"
+  return 0
+}
+
+print_link() {
+    if [ -z "$HOST" ] || [ -z "$PORT" ] || [ -z "$SECRET" ]; then
+      echo "Missing HOST/PORT/SECRET in $CONFFILE" >&2
+      return 1
+    fi
+
+    link_host="$HOST"
+    br_ip="$(ip -f inet addr show dev br0 2>/dev/null | sed -n 's/.*inet \([0-9.]\+\)\/.*/\1/p' | head -n 1)"
+    [ -n "$br_ip" ] && link_host="$br_ip"
+    echo -e "$ansi_blue Connect link: tg://proxy?server=$link_host&port=$PORT&secret=dd$SECRET $ansi_std"
+    logger "Connect link: tg://proxy?server=$link_host&port=$PORT&secret=dd$SECRET"
+}
+
+start() {
+  load_config || return 1
+
+  if [ -z "$SECRET" ]; then
+    echo "SECRET is empty in $CONFFILE" >&2
+    return 1
+  fi
+
+  echo -e -n "$ansi_white Starting $DESC... $ansi_std"
+
+  if [ -n "`pidof $PROC`" ]; then
+    echo -e "            $ansi_yellow already running. $ansi_std"
+    return 0
+  fi
+
+  if [ "$LOG_LEVEL" = "1" ]; then
+	"$PROG" --host "$HOST" --port "$PORT" --secret "$SECRET" --dc-ip-default "$DC_IP_DEFAULT" --dc-ip-default-pool "$DC_IP_DEFAULT_POOL" $EXTRA_ARGS >>"$LOGFILE" 2>&1 &
+  else
+	"$PROG" --host "$HOST" --port "$PORT" --secret "$SECRET" --dc-ip-default "$DC_IP_DEFAULT" --dc-ip-default-pool "$DC_IP_DEFAULT_POOL" $EXTRA_ARGS >/dev/null 2>&1 &
+  fi
+
+  if [ -z "`pidof $PROC`" ]; then
+    echo -e "            $ansi_red failed. $ansi_std"
+    logger "Failed to start $DESC from $CALLER."
+    return 255
+  else
+    echo -e "            $ansi_green done. $ansi_std"
+    logger "Started $DESC from $CALLER."
+    print_link
+    return 0
+  fi
+}
+
+stop() {
+  echo -e -n "$ansi_white Shutting down $PROC... $ansi_std"
+  killall $PROC 2>/dev/null
+
+  if [ -n "`pidof $PROC`" ]; then
+    echo -e "            $ansi_red failed. $ansi_std"
+    return 255
+  else
+    echo -e "            $ansi_green done. $ansi_std"
+    return 0
+  fi
+}
+
+status() {
+  echo -e -n "$ansi_white Checking $DESC... $ansi_std"
+  if [ -n "`pidof $PROC`" ]; then
+    echo -e "            $ansi_green alive. $ansi_std";
+    load_config || return 1
+    print_link
+    return 0
+  else
+    echo -e "            $ansi_red dead. $ansi_std";
+    return 1
+  fi
+}
+
+for PROC in $PROCS; do
+  case $ACTION in
+    start)
+      start
+      ;;
+    stop)
+      stop
+      ;;
+    restart)
+      stop && start
+      ;;
+    status)
+      status
+      ;;
+    *)
+      echo -e "$ansi_white Usage: $0 (start|stop|restart|status)$ansi_std"
+      exit 1
+      ;;
+  esac
+done

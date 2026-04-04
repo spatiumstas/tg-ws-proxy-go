@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/hex"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -17,6 +18,10 @@ func main() {
 	cfg, err := parseFlags()
 	if err != nil {
 		log.Fatalf("config error: %v", err)
+	}
+	if cfg.GenSecret {
+		fmt.Println(cfg.SecretHex)
+		return
 	}
 
 	initLogger(cfg)

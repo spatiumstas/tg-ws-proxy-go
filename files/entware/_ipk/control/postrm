@@ -5,5 +5,6 @@ set -e
 
 rm -f /opt/bin/tg-ws-proxy
 rm -f /opt/etc/init.d/S61tg-ws-proxy
+rm -f /opt/etc/tg-ws-proxy.conf-opkg
 
 echo "tg-ws-proxy removed"

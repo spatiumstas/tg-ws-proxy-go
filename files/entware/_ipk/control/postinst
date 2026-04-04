@@ -10,7 +10,7 @@ INIT_SCRIPT=/opt/etc/init.d/S61tg-ws-proxy
 if [ -f "$CONFFILE" ]; then
 	. "$CONFFILE" || true
 	if [ -z "${SECRET:-}" ]; then
-		secret="$(head -c 16 /dev/urandom | xxd -ps 2>/dev/null | tr -d ' \r\n')"
+		secret="$(/opt/bin/tg-ws-proxy --gen-secret 2>/dev/null | tr -d ' \r\n' || true)"
 		if [ "${#secret}" -eq 32 ]; then
 			if grep -Eq '^[[:space:]]*SECRET=' "$CONFFILE"; then
 				sed -i "s|^[[:space:]]*SECRET=.*$|SECRET=$secret|" "$CONFFILE"

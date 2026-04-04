@@ -16,6 +16,7 @@ func parseFlags() (*Config, error) {
 	host := flag.String("host", "127.0.0.1", "Listen host")
 	port := flag.Int("port", 1443, "Listen port")
 	secret := flag.String("secret", "", "MTProto secret (32 hex chars)")
+	genSecret := flag.Bool("gen-secret", false, "Generate random secret and print it")
 	verbose := flag.Bool("v", false, "Verbose logs")
 	logFile := flag.String("log-file", "", "Log file path")
 	logMaxMB := flag.Float64("log-max-mb", 5, "Max log file size before rotate")
@@ -39,7 +40,9 @@ func parseFlags() (*Config, error) {
 			return nil, err
 		}
 		*secret = hex.EncodeToString(b)
-		log.Printf("INFO   Generated secret: %s", *secret)
+		if !*genSecret {
+			log.Printf("INFO   Generated secret: %s", *secret)
+		}
 	}
 	if len(*secret) != 32 {
 		return nil, errors.New("secret must be exactly 32 hex chars")
@@ -107,6 +110,7 @@ func parseFlags() (*Config, error) {
 		Host:        *host,
 		Port:        *port,
 		SecretHex:   *secret,
+		GenSecret:   *genSecret,
 		DCMap:       dcMap,
 		DCPool:      dcPool,
 		Verbose:     *verbose,

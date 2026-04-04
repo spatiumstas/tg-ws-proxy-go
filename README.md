@@ -1,6 +1,6 @@
-# TG WS Proxy Go (KeeneticOS)
+# TG WS Proxy Go for embedded devices
 
-### Install
+### Install (KeeneticOS)
 
 Repository:
 ```shell
@@ -11,12 +11,19 @@ Package:
 opkg install tg-ws-proxy
 ```
 
+### Install (manual)
+Insert package link from Releases
+```shell
+opkg install %link%
+```
+
 ### Config
 
 Main config file:
 
 ```shell
-/opt/etc/tg-ws-proxy.conf
+# Entware (KeeneticOS): /opt/etc/tg-ws-proxy.conf
+# OpenWrt/generic opkg: /etc/tg-ws-proxy.conf
 ```
 
 Minimal config example:
@@ -50,10 +57,17 @@ EXTRA_ARGS="--dc-ip 203:91.105.192.100 -v"
 ### Run
 
 ```shell
+# Entware (KeeneticOS)
 /opt/etc/init.d/S61tg-ws-proxy start
 /opt/etc/init.d/S61tg-ws-proxy status
 /opt/etc/init.d/S61tg-ws-proxy restart
 /opt/etc/init.d/S61tg-ws-proxy stop
+
+# OpenWrt/generic opkg
+/etc/init.d/tg-ws-proxy start
+/etc/init.d/tg-ws-proxy status
+/etc/init.d/tg-ws-proxy restart
+/etc/init.d/tg-ws-proxy stop
 ```
 
 ### Logs
@@ -61,7 +75,21 @@ EXTRA_ARGS="--dc-ip 203:91.105.192.100 -v"
 If `LOG_LEVEL=1`, service logs are written to:
 
 ```shell
-/opt/var/log/tg-ws-proxy.log
+# Entware (KeeneticOS): /opt/var/log/tg-ws-proxy.log
+# OpenWrt/generic opkg: /var/log/tg-ws-proxy.log
+```
+
+### Build from profile
+
+```shell
+cp config/entware/aarch64-3.10.config .config
+make package
+```
+
+Output package:
+
+```shell
+.build/tg-ws-proxy_<version>-1_<platform>_<target>.ipk
 ```
 
 ### Remove
@@ -70,7 +98,8 @@ If `LOG_LEVEL=1`, service logs are written to:
 opkg remove tg-ws-proxy
 ```
 
-### Remove repository 
+### Remove repository
+
 ```shell
 rm /opt/etc/opkg/feedly.conf
 ```

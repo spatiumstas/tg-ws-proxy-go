@@ -1,90 +1,101 @@
+-include .config
+
 SHELL := /bin/bash
-PACKAGE := tg-ws-proxy
-ROOT_DIR := /opt
-DEPENDENCIES := ca-certificates xxd
-GOOS ?= linux
-GOARCH ?= arm64
+
+PKG_NAME := tg-ws-proxy
+PKG_DESCRIPTION := Telegram MTProto WS bridge proxy (Go binary)
+PKG_LICENSE := MIT
+PKG_SECTION := net
+PKG_MAINTAINER := tg-ws-proxy maintainers
+
+PKG_VERSION := $(shell cat VERSION)
+PKG_REVISION ?= 1
+
+PLATFORM ?=
+TARGET ?=
+GOOS ?=
+GOARCH ?=
 GOARM ?=
 GOMIPS ?=
 CGO_ENABLED ?= 0
 GO_PROXY_DIR ?= src
-GO_BIN_NAME ?= tg-ws-proxy
-GO_BIN ?= out/$(GO_BIN_NAME)-$(GOARCH)
 
-DEFAULT_PKG_ARCH := $(GOARCH)
-ifeq ($(GOARCH),amd64)
-DEFAULT_PKG_ARCH := x64
-endif
-ifeq ($(GOARCH),arm64)
-DEFAULT_PKG_ARCH := aarch64
-endif
-ifeq ($(GOARCH),arm)
-ifeq ($(GOARM),7)
-DEFAULT_PKG_ARCH := armv7
+ifeq ($(PLATFORM),entware)
+	PKG_DEPENDS := ca-certificates
+else ifeq ($(PLATFORM),openwrt)
+	PKG_DEPENDS := ca-certificates
 else
-DEFAULT_PKG_ARCH := arm
-endif
-endif
-ifeq ($(GOARCH),mipsle)
-DEFAULT_PKG_ARCH := mipsel
+	$(error Unsupported PLATFORM='$(PLATFORM)'; expected entware or openwrt)
 endif
 
-PKG_ARCH ?= $(DEFAULT_PKG_ARCH)
-VERSION := $(shell cat VERSION)
+BUILDS_DIR := ./.build
+BUILD_DIR := $(BUILDS_DIR)/$(PLATFORM)_$(TARGET)
+COMPILE_DIR := $(BUILD_DIR)/compile
+ROOT_DIR := $(BUILD_DIR)/root
+CONTROL_DIR := $(BUILD_DIR)/control
 
-.PHONY: clean _build-go _pkg-clean _pkg-control _pkg-scripts _pkg-data _pkg-ipk tg-ws-proxy-ipk
+ifeq ($(PLATFORM),entware)
+BIN_DIR := $(ROOT_DIR)/opt/bin
+ETC_DIR := $(ROOT_DIR)/opt/etc
+VAR_DIR := $(ROOT_DIR)/opt/var
+else
+BIN_DIR := $(ROOT_DIR)/usr/bin
+ETC_DIR := $(ROOT_DIR)/etc
+VAR_DIR := $(ROOT_DIR)/var
+endif
+
+define _copy_files
+	if [ -d $(1)/_ipk/control ]; then mkdir -p "$(CONTROL_DIR)"; cp -r $(1)/_ipk/control/* "$(CONTROL_DIR)"; fi
+	if [ -d $(1)/bin ]; then mkdir -p "$(BIN_DIR)"; cp -r $(1)/bin/* "$(BIN_DIR)"; fi
+	if [ -d $(1)/etc ]; then mkdir -p "$(ETC_DIR)"; cp -r $(1)/etc/* "$(ETC_DIR)"; fi
+	if [ -d $(1)/var ]; then mkdir -p "$(VAR_DIR)"; cp -r $(1)/var/* "$(VAR_DIR)"; fi
+endef
+
+PACKAGE_FILE := $(BUILDS_DIR)/$(PKG_NAME)_$(PKG_VERSION)-$(PKG_REVISION)_$(PLATFORM)_$(TARGET).ipk
+
+.PHONY: all clean build prepare_files package package_ipk
+
+all: build package
 
 clean:
-	rm -rf out
+	rm -rf $(BUILDS_DIR)
 
-_build-go:
-	mkdir -p out
+build:
+	mkdir -p "$(COMPILE_DIR)"
 	cd "$(GO_PROXY_DIR)" && \
-		GOOS=$(GOOS) GOARCH=$(GOARCH) GOARM=$(GOARM) GOMIPS=$(GOMIPS) CGO_ENABLED=$(CGO_ENABLED) \
-		go build -o "$(abspath $(GO_BIN))" .
-	echo "$(VERSION)" > out/VERSION
+		GOOS="$(GOOS)" GOARCH="$(GOARCH)" GOARM="$(GOARM)" GOMIPS="$(GOMIPS)" CGO_ENABLED="$(CGO_ENABLED)" \
+		go build -trimpath -o "$(abspath $(COMPILE_DIR))/tg-ws-proxy" .
 
-_pkg-clean:
-	rm -rf out/pkg
-	mkdir -p out/pkg/control
-	mkdir -p out/pkg/data
+prepare_files: build
+	rm -rf "$(ROOT_DIR)" "$(CONTROL_DIR)"
+	mkdir -p "$(BIN_DIR)" "$(CONTROL_DIR)"
 
-_pkg-control:
-	version="$$(cat out/VERSION)"; \
-	echo "Package: $(PACKAGE)" > out/pkg/control/control; \
-	echo "Version: $$version-1" >> out/pkg/control/control; \
-	echo "Depends: $(DEPENDENCIES)" >> out/pkg/control/control; \
-	echo "Section: net" >> out/pkg/control/control; \
-	echo "Architecture: $(PKG_ARCH)" >> out/pkg/control/control; \
-	echo "License: MIT" >> out/pkg/control/control; \
-	echo "Description: Telegram MTProto WS bridge proxy (Go binary)" >> out/pkg/control/control
+	cp "$(COMPILE_DIR)/tg-ws-proxy" "$(BIN_DIR)/tg-ws-proxy"
+	$(call _copy_files,./files/common)
+	$(if $(filter entware,$(PLATFORM)), $(call _copy_files,./files/entware))
+	$(if $(filter openwrt,$(PLATFORM)), $(call _copy_files,./files/openwrt))
 
-_pkg-scripts:
-	cp common/ipk/prerm out/pkg/control/prerm
-	cp common/ipk/postinst out/pkg/control/postinst
-	cp common/ipk/postrm out/pkg/control/postrm
-	cp common/ipk/conffiles out/pkg/control/conffiles
-	find out/pkg/control -type f -print0 | xargs -0 dos2unix
-	chmod +x out/pkg/control/prerm out/pkg/control/postinst out/pkg/control/postrm
+	echo "Package: $(PKG_NAME)" > "$(CONTROL_DIR)/control"
+	echo "Version: $(PKG_VERSION)-$(PKG_REVISION)" >> "$(CONTROL_DIR)/control"
+	echo "Depends: $(PKG_DEPENDS)" >> "$(CONTROL_DIR)/control"
+	echo "Section: $(PKG_SECTION)" >> "$(CONTROL_DIR)/control"
+	echo "Architecture: $(TARGET)" >> "$(CONTROL_DIR)/control"
+	echo "License: $(PKG_LICENSE)" >> "$(CONTROL_DIR)/control"
+	echo "Maintainer: $(PKG_MAINTAINER)" >> "$(CONTROL_DIR)/control"
+	echo "Description: $(PKG_DESCRIPTION)" >> "$(CONTROL_DIR)/control"
 
-_pkg-data:
-	mkdir -p out/pkg/data$(ROOT_DIR)/etc/init.d
-	mkdir -p out/pkg/data$(ROOT_DIR)/etc
-	mkdir -p out/pkg/data$(ROOT_DIR)/bin
-	cp "$(GO_BIN)" out/pkg/data$(ROOT_DIR)/bin/tg-ws-proxy
-	cat common/tg-ws-proxy-common.sh > out/pkg/data$(ROOT_DIR)/etc/init.d/S61tg-ws-proxy
-	awk '/^start\(\)/{p=1} p{print}' common/S61tg-ws-proxy >> out/pkg/data$(ROOT_DIR)/etc/init.d/S61tg-ws-proxy
-	cp common/tg-ws-proxy.conf out/pkg/data$(ROOT_DIR)/etc/tg-ws-proxy.conf
-	find out/pkg/data -type f -print0 | xargs -0 dos2unix
-	chmod +x out/pkg/data$(ROOT_DIR)/bin/tg-ws-proxy
-	chmod +x out/pkg/data$(ROOT_DIR)/etc/init.d/S61tg-ws-proxy
+	chmod +x "$(BIN_DIR)/tg-ws-proxy"
+	if [ -d "$(ETC_DIR)/init.d" ]; then chmod +x "$(ETC_DIR)/init.d"/*; fi
+	if [ -f "$(CONTROL_DIR)/prerm" ]; then chmod +x "$(CONTROL_DIR)/prerm"; fi
+	if [ -f "$(CONTROL_DIR)/postinst" ]; then chmod +x "$(CONTROL_DIR)/postinst"; fi
+	if [ -f "$(CONTROL_DIR)/postrm" ]; then chmod +x "$(CONTROL_DIR)/postrm"; fi
 
-_pkg-ipk: _pkg-clean _pkg-control _pkg-scripts _pkg-data
-	cd out/pkg/control; tar czf ../control.tar.gz .; cd ../../..
-	cd out/pkg/data; tar czf ../data.tar.gz .; cd ../../..
-	echo 2.0 > out/pkg/debian-binary
-	version="$$(cat out/VERSION)"; \
-	cd out/pkg; tar czf ../$(PACKAGE)_$$version-1_$(PKG_ARCH).ipk control.tar.gz data.tar.gz debian-binary; cd ../..
+package: package_ipk
 
-tg-ws-proxy-ipk: _build-go _pkg-ipk
-	@echo "Built: out/$(PACKAGE)_$$(cat out/VERSION)-1_$(PKG_ARCH).ipk"
+package_ipk: prepare_files
+	mkdir -p "$(BUILDS_DIR)"
+	echo 2.0 > "$(BUILD_DIR)/debian-binary"
+	tar -C "$(CONTROL_DIR)" -czf "$(BUILD_DIR)/control.tar.gz" --owner=0 --group=0 .
+	tar -C "$(ROOT_DIR)" -czf "$(BUILD_DIR)/data.tar.gz" --owner=0 --group=0 .
+	tar -C "$(BUILD_DIR)" -czf "$(PACKAGE_FILE)" --owner=0 --group=0 debian-binary control.tar.gz data.tar.gz
+	@echo "Built: $(PACKAGE_FILE)"

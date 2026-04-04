@@ -3,37 +3,54 @@ name: Build tg-ws-proxy
 on:
   workflow_dispatch:
   release:
-    types:
-      - created
+    types: [created]
 
 permissions:
   contents: write
 
 jobs:
+  prepare:
+    name: Prepare build matrix
+    runs-on: ubuntu-latest
+    outputs:
+      configs: ${{ steps.collect.outputs.configs }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Build config matrix
+        id: collect
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          from pathlib import Path
+
+          configs = sorted(Path("config").glob("*/*.config"))
+
+          if not configs:
+              raise SystemExit("No build configs found")
+
+          matrix = []
+          for config in configs:
+              matrix.append({
+                  "config": config.as_posix(),
+                  "name": config.stem,
+              })
+
+          print(f"configs={json.dumps(matrix, separators=(',', ':'))}")
+          PY
+
   build:
+    name: Build packages (${{ matrix.name }})
+    needs: prepare
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - arch: aarch64
-            pkg_arch: aarch64-3.10
-            goarch: arm64
-            goarm: ""
-            gomips: ""
-          - arch: mipsel
-            pkg_arch: mipsel-3.4
-            goarch: mipsle
-            goarm: ""
-            gomips: softfloat
-          - arch: mips
-            pkg_arch: mips-3.4
-            goarch: mips
-            goarm: ""
-            gomips: softfloat
+        include: ${{ fromJson(needs.prepare.outputs.configs) }}
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v6
 
       - name: Setup Go
@@ -43,52 +60,40 @@ jobs:
           cache: true
           cache-dependency-path: src/go.sum
 
-      - name: Install build tools
+      - name: Build and package
         run: |
-          sudo apt-get update
-          sudo apt-get install -y dos2unix
+          cp "${{ matrix.config }}" .config
+          make package
 
-      - name: Resolve project directory
-        id: project-dir
+      - name: Collect package files
+        id: package_outputs
         run: |
-          if [ -f tg-ws-proxy/Makefile ]; then
-            echo "dir=tg-ws-proxy" >> "$GITHUB_OUTPUT"
-          elif [ -f Makefile ] && [ -d common ] && [ -d .github/workflows ]; then
-            echo "dir=." >> "$GITHUB_OUTPUT"
-          else
-            echo "Could not find tg-ws-proxy project directory"
-            echo "Repository root content:"
-            ls -la
+          mapfile -t packages < <(find .build -maxdepth 1 -type f -name 'tg-ws-proxy_*.ipk' | sort)
+          if [ ${#packages[@]} -eq 0 ]; then
+            echo "No package files found" >&2
             exit 1
           fi
-
-      - name: Build package
-        run: |
-          GOARCH_INPUT="${{ matrix.goarch }}"
-          GOARM_INPUT="${{ matrix.goarm }}"
-          GOMIPS_INPUT="${{ matrix.gomips }}"
-          PKG_ARCH_INPUT="${{ matrix.pkg_arch }}"
-          PROJECT_DIR="${{ steps.project-dir.outputs.dir }}"
-          GO_PROXY_PATH="src"
-          VERSION_INPUT="$(cat "$PROJECT_DIR/VERSION")"
-          if [ -z "$VERSION_INPUT" ]; then
-            echo "VERSION file is empty: $PROJECT_DIR/VERSION"
+          if [ ${#packages[@]} -gt 1 ]; then
+            echo "Expected one package file, found ${#packages[@]}" >&2
+            printf '%s\n' "${packages[@]}"
             exit 1
           fi
-          if [ ! -d "$PROJECT_DIR/$GO_PROXY_PATH" ]; then
-            echo "src directory not found in project root"
-            echo "Expected: $PROJECT_DIR/$GO_PROXY_PATH"
-            ls -la "$PROJECT_DIR"
-            exit 1
-          fi
-          make -C "$PROJECT_DIR" tg-ws-proxy-ipk PKG_ARCH="$PKG_ARCH_INPUT" GO_PROXY_DIR="$GO_PROXY_PATH" GOARCH="$GOARCH_INPUT" GOARM="$GOARM_INPUT" GOMIPS="$GOMIPS_INPUT"
+          echo "package_path=${packages[0]}" >> "$GITHUB_OUTPUT"
+          echo "package_name=$(basename "${packages[0]}")" >> "$GITHUB_OUTPUT"
 
-      - name: Upload artifact
+      - name: Upload package artifact
         uses: actions/upload-artifact@v7
         with:
-          name: tg-ws-proxy-${{ matrix.arch }}
-          path: ${{ steps.project-dir.outputs.dir }}/out/tg-ws-proxy_*_${{ matrix.pkg_arch }}.ipk
+          name: ${{ steps.package_outputs.outputs.package_name }}
+          path: ${{ steps.package_outputs.outputs.package_path }}
           if-no-files-found: error
+          compression-level: 0
+
+      - name: Upload package asset to release
+        if: ${{ github.event_name == 'release' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.package_outputs.outputs.package_path }}
 
   publish-latest-release:
     runs-on: ubuntu-latest
