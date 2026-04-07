@@ -36,8 +36,11 @@ print_link() {
     fi
 
     link_host="$HOST"
-    br_ip="$(ip -f inet addr show dev br0 2>/dev/null | sed -n 's/.*inet \([0-9.]\+\)\/.*/\1/p' | head -n 1)"
-    [ -n "$br_ip" ] && link_host="$br_ip"
+    if [ "$link_host" = "0.0.0.0" ]; then
+            br_ip="$(ip -f inet addr show dev br-lan 2>/dev/null | sed -n 's/.*inet \([0-9.]\+\)\/.*/\1/p' | head -n 1)"
+            [ -n "$br_ip" ] || br_ip="$(ip -f inet addr show dev br0 2>/dev/null | sed -n 's/.*inet \([0-9.]\+\)\/.*/\1/p' | head -n 1)"
+            [ -n "$br_ip" ] && link_host="$br_ip"
+    fi
     echo -e "$ansi_blue Connect link: tg://proxy?server=$link_host&port=$PORT&secret=dd$SECRET $ansi_std"
     logger "Connect link: tg://proxy?server=$link_host&port=$PORT&secret=dd$SECRET"
 }

@@ -1,7 +1,8 @@
-# TG WS Proxy Go for embedded devices
+# TG WS Proxy Go for embedded devices ([FAQ](https://github.com/Flowseal/tg-ws-proxy/issues/389))
 
-### Install (KeeneticOS)
+### Install
 
+> KeeneticOS
 Repository:
 ```shell
 curl -fsSL https://raw.githubusercontent.com/spatiumstas/feedly/main/add-repo.sh | sh
@@ -11,10 +12,16 @@ Package:
 opkg install tg-ws-proxy
 ```
 
-### Install (manual)
+> OpenWRT (IPK, APK)
 Insert package link from Releases
+
 ```shell
 opkg install %link%
+```
+APK
+```shell
+wget -O "/etc/apk/keys/tg-ws-proxy.pem" "https://github.com/spatiumstas/tg-ws-proxy-go/releases/download/0.4/tg-ws-proxy.pem"
+apk add %link%
 ```
 
 ### Config
@@ -42,7 +49,7 @@ EXTRA_ARGS=""
 
 1. `SECRET` must be 32 hex chars. If empty, it is auto-generated during install.
 2. `DC_IP_DEFAULT` and `DC_IP_DEFAULT_POOL` are global defaults for implicit DC map (`2,4`).
-3. `EXTRA_ARGS` is for per-DC overrides and extra runtime flags.
+3. `EXTRA_ARGS` is for per-DC overrides and extra runtime flags, [CFProxy](https://github.com/Flowseal/tg-ws-proxy/blob/main/docs/CfProxy.md)
 
 Override examples:
 
@@ -52,6 +59,9 @@ EXTRA_ARGS="--dc-ip-pool 2:149.154.175.50,149.154.167.220"
 
 # Per-DC single IP override (DC203) + verbose logs
 EXTRA_ARGS="--dc-ip 203:91.105.192.100 -v"
+
+# CF Proxy
+EXTRA_ARGS="--cfproxy-domain your-domain.tld"
 ```
 
 ### Run
@@ -63,11 +73,11 @@ EXTRA_ARGS="--dc-ip 203:91.105.192.100 -v"
 /opt/etc/init.d/S61tg-ws-proxy restart
 /opt/etc/init.d/S61tg-ws-proxy stop
 
-# OpenWrt/generic opkg
-/etc/init.d/tg-ws-proxy start
-/etc/init.d/tg-ws-proxy status
-/etc/init.d/tg-ws-proxy restart
-/etc/init.d/tg-ws-proxy stop
+# OpenWrt/generic OPKG
+service tg-ws-proxy start
+service tg-ws-proxy status
+service tg-ws-proxy restart
+service tg-ws-proxy stop
 ```
 
 ### Logs
@@ -76,7 +86,7 @@ If `LOG_LEVEL=1`, service logs are written to:
 
 ```shell
 # Entware (KeeneticOS): /opt/var/log/tg-ws-proxy.log
-# OpenWrt/generic opkg: /var/log/tg-ws-proxy.log
+# OpenWrt/generic OPKG: /var/log/tg-ws-proxy.log
 ```
 
 ### Build from profile

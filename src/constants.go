@@ -24,6 +24,7 @@ const (
 	acceptBackoffMin  = 5 * time.Millisecond
 	acceptBackoffMax  = 1 * time.Second
 	defaultMaxConns   = 1024
+	defaultCFProxyDomain = "pclead.co.uk"
 )
 
 var (
@@ -47,7 +48,7 @@ var (
 		3:   "149.154.175.100",
 		4:   "149.154.167.91",
 		5:   "149.154.171.5",
-		203: "91.105.192.100",
+		203: "149.154.175.50",
 	}
 
 	dcOverrides = map[int]int{203: 2}

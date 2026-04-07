@@ -37,6 +37,13 @@ func main() {
 		dc, ip := item.dc, item.ip
 		log.Printf("INFO       DC%d: %s", dc, ip)
 	}
+	if cfg.FallbackCFProxy {
+		prio := "TCP first"
+		if cfg.FallbackCFProxyPriority {
+			prio = "CF first"
+		}
+		log.Printf("INFO     CF proxy:      %s (%s)", cfg.FallbackCFProxyDomain, prio)
+	}
 	log.Printf("INFO   %s", strings.Repeat("=", 60))
 	log.Printf("INFO     Connect link:")
 	log.Printf("INFO       tg://proxy?server=%s&port=%d&secret=dd%s", linkHost, cfg.Port, cfg.SecretHex)
@@ -133,26 +140,77 @@ func handleClient(client net.Conn, cfg *Config, secret []byte) {
 		return
 	}
 
-	if isBlacklisted(hi.DC, hi.IsMedia) {
+	newFallbackSplitter := func() *msgSplitter {
+		ms, err := newMsgSplitter(relayInit, protoInt)
+		if err != nil {
+			return nil
+		}
+		return ms
+	}
+
+	doFallback := func(setState bool, wsFailedRedirect bool, allRedirect bool, primaryTarget string) {
+		key := dcKey{DC: hi.DC, IsMedia: hi.IsMedia}
+		if setState {
+			if wsFailedRedirect && allRedirect {
+				setBlacklisted(key)
+				warnf("[%s] DC%d%s blacklisted for WS (all redirects)", label, hi.DC, mediaTag)
+			} else {
+				setCooldown(key)
+			}
+		}
+
 		fallback := fallbackIP(hi.DC)
 		if fallback == "" {
-			log.Printf("WARN   [%s] DC%d%s WS blacklisted and no fallback", label, hi.DC, mediaTag)
+			fallback = primaryTarget
+		}
+
+		useCF := cfg.FallbackCFProxy && strings.TrimSpace(cfg.FallbackCFProxyDomain) != ""
+		tryCF := func() bool {
+			splitter := newFallbackSplitter()
+			if err := cfproxyFallback(label, hi.DC, hi.IsMedia, cfg.FallbackCFProxyDomain, client, relayInit, cltDec, cltEnc, tgEnc, tgDec, splitter); err == nil {
+				log.Printf("INFO   [%s] DC%d%s CF proxy fallback closed", label, hi.DC, mediaTag)
+				return true
+			}
+			return false
+		}
+		tryTCP := func() bool {
+			if fallback == "" {
+				return false
+			}
+			log.Printf("INFO   [%s] DC%d%s -> TCP fallback to %s:443", label, hi.DC, mediaTag, fallback)
+			err := tcpFallback(client, fallback, relayInit, cltDec, cltEnc, tgEnc, tgDec)
+			if err == nil {
+				log.Printf("INFO   [%s] DC%d%s TCP fallback closed", label, hi.DC, mediaTag)
+				return true
+			}
+			return false
+		}
+
+		if useCF && cfg.FallbackCFProxyPriority {
+			if tryCF() || tryTCP() {
+				return
+			}
+		} else if useCF {
+			if tryTCP() || tryCF() {
+				return
+			}
+		} else if tryTCP() {
 			return
 		}
-		log.Printf("INFO   [%s] DC%d%s WS blacklisted -> TCP fallback %s:443", label, hi.DC, mediaTag, fallback)
-		_ = tcpFallback(client, fallback, relayInit, cltDec, cltEnc, tgEnc, tgDec)
+
+		log.Printf("WARN   [%s] DC%d%s no fallback available", label, hi.DC, mediaTag)
+	}
+
+	if isBlacklisted(hi.DC, hi.IsMedia) {
+		log.Printf("INFO   [%s] DC%d%s WS blacklisted -> fallback", label, hi.DC, mediaTag)
+		doFallback(false, false, false, "")
 		return
 	}
 
 	targets, hasTarget := cfg.DCPool[hi.DC]
 	if !hasTarget || len(targets) == 0 {
-		fallback := fallbackIP(hi.DC)
-		if fallback == "" {
-			log.Printf("WARN   [%s] DC%d%s no fallback available", label, hi.DC, mediaTag)
-			return
-		}
-		log.Printf("INFO   [%s] DC%d not in config -> TCP fallback %s:443", label, hi.DC, fallback)
-		_ = tcpFallback(client, fallback, relayInit, cltDec, cltEnc, tgEnc, tgDec)
+		log.Printf("INFO   [%s] DC%d%s not in config -> fallback", label, hi.DC, mediaTag)
+		doFallback(false, false, false, "")
 		return
 	}
 	primaryTarget := targets[0]
@@ -186,23 +244,6 @@ func handleClient(client net.Conn, cfg *Config, secret []byte) {
 		}
 		return nil, wsFailedRedirect, allRedirect
 	}
-	fallbackToTCP := func(wsFailedRedirect, allRedirect bool) {
-		if wsFailedRedirect && allRedirect {
-			setBlacklisted(key)
-			warnf("[%s] DC%d%s blacklisted for WS (all redirects)", label, hi.DC, mediaTag)
-		} else {
-			setCooldown(key)
-		}
-		fallback := fallbackIP(hi.DC)
-		if fallback == "" {
-			fallback = primaryTarget
-		}
-		log.Printf("INFO   [%s] DC%d%s -> TCP fallback to %s:443", label, hi.DC, mediaTag, fallback)
-		err := tcpFallback(client, fallback, relayInit, cltDec, cltEnc, tgEnc, tgDec)
-		if err == nil {
-			log.Printf("INFO   [%s] DC%d%s TCP fallback closed", label, hi.DC, mediaTag)
-		}
-	}
 
 	var ws *websocket.Conn
 	fromPool := false
@@ -222,7 +263,7 @@ func handleClient(client net.Conn, cfg *Config, secret []byte) {
 		ws, wsFailedRedirect, allRedirect = connectWS(timeout)
 
 		if ws == nil {
-			fallbackToTCP(wsFailedRedirect, allRedirect)
+			doFallback(true, wsFailedRedirect, allRedirect, primaryTarget)
 			return
 		}
 	}
@@ -237,7 +278,7 @@ func handleClient(client net.Conn, cfg *Config, secret []byte) {
 		_ = ws.Close()
 		if !fromPool {
 			setCooldown(key)
-			fallbackToTCP(false, false)
+			doFallback(false, false, false, primaryTarget)
 			return
 		}
 
@@ -249,14 +290,14 @@ func handleClient(client net.Conn, cfg *Config, secret []byte) {
 		allRedirect := true
 		ws, wsFailedRedirect, allRedirect = connectWS(timeout)
 		if ws == nil {
-			fallbackToTCP(wsFailedRedirect, allRedirect)
+			doFallback(true, wsFailedRedirect, allRedirect, primaryTarget)
 			return
 		}
 		if err := ws.WriteMessage(websocket.BinaryMessage, relayInit); err != nil {
 			warnf("[%s] ws init write failed after pool retry: %v", label, err)
 			_ = ws.Close()
 			setCooldown(key)
-			fallbackToTCP(false, false)
+			doFallback(false, false, false, primaryTarget)
 			return
 		}
 	}

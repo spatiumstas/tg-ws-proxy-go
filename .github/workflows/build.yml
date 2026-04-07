@@ -60,46 +60,89 @@ jobs:
           cache: true
           cache-dependency-path: src/go.sum
 
+      - name: Install apk-tools
+        if: ${{ startsWith(matrix.config, 'config/openwrt/') }}
+        run: |
+          docker run --rm -v /usr/local/bin:/mnt alpine:edge sh -c "apk add --no-cache apk-tools-static && cp /sbin/apk.static /mnt/apk && chmod +x /mnt/apk"          
+
       - name: Build and package
+        env:
+          OPENWRT_APK_SECRET_KEY: ${{ secrets.OPENWRT_APK_SECRET_KEY }}
         run: |
           cp "${{ matrix.config }}" .config
+
+          if [[ "${{ matrix.config }}" == config/openwrt/* ]]; then
+            if [ -z "$OPENWRT_APK_SECRET_KEY" ]; then
+              echo "OpenWrt APK signing key is required: OPENWRT_APK_SECRET_KEY" >&2
+              exit 1
+            fi
+
+            KEY_FILE="$RUNNER_TEMP/openwrt-apk-private.pem"
+            printf '%s' "$OPENWRT_APK_SECRET_KEY" > "$KEY_FILE"
+            export BUILD_KEY_APK_SEC="$KEY_FILE"
+          fi
+
           make package
 
       - name: Collect package files
         id: package_outputs
         run: |
-          mapfile -t packages < <(find .build -maxdepth 1 -type f -name 'tg-ws-proxy_*.ipk' | sort)
-          if [ ${#packages[@]} -eq 0 ]; then
-            echo "No package files found" >&2
+          mapfile -t ipk_packages < <(find .build -maxdepth 1 -type f -name 'tg-ws-proxy_*.ipk' | sort)
+          if [ ${#ipk_packages[@]} -eq 0 ]; then
+            echo "No ipk package files found" >&2
             exit 1
           fi
-          if [ ${#packages[@]} -gt 1 ]; then
-            echo "Expected one package file, found ${#packages[@]}" >&2
-            printf '%s\n' "${packages[@]}"
+          if [ ${#ipk_packages[@]} -gt 1 ]; then
+            echo "Expected one ipk package file, found ${#ipk_packages[@]}" >&2
+            printf '%s\n' "${ipk_packages[@]}"
             exit 1
           fi
-          echo "package_path=${packages[0]}" >> "$GITHUB_OUTPUT"
-          echo "package_name=$(basename "${packages[0]}")" >> "$GITHUB_OUTPUT"
 
-      - name: Upload package artifact
+          package_ipk="${ipk_packages[0]}"
+
+          if [[ "${{ matrix.config }}" == config/openwrt/* ]]; then
+            mapfile -t apk_packages < <(find .build -maxdepth 1 -type f -name 'tg-ws-proxy_*.apk' | sort)
+            if [ ${#apk_packages[@]} -eq 0 ]; then
+              echo "No apk package files found for OpenWrt build" >&2
+              exit 1
+            fi
+            if [ ${#apk_packages[@]} -gt 1 ]; then
+              echo "Expected one apk package file, found ${#apk_packages[@]}" >&2
+              printf '%s\n' "${apk_packages[@]}"
+              exit 1
+            fi
+            package_apk="${apk_packages[0]}"
+          fi
+
+          echo "package_ipk=$package_ipk" >> "$GITHUB_OUTPUT"
+          package_ipk_name="$(basename "$package_ipk")"
+          echo "package_ipk_name=$package_ipk_name" >> "$GITHUB_OUTPUT"
+          if [ -n "${package_apk:-}" ]; then
+            echo "package_apk=$package_apk" >> "$GITHUB_OUTPUT"
+            package_apk_name="$(basename "$package_apk")"
+            echo "package_apk_name=$package_apk_name" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload IPK artifact
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ steps.package_outputs.outputs.package_name }}
-          path: ${{ steps.package_outputs.outputs.package_path }}
+          name: ${{ steps.package_outputs.outputs.package_ipk_name }}
+          path: ${{ steps.package_outputs.outputs.package_ipk }}
           if-no-files-found: error
           compression-level: 0
 
-      - name: Upload package asset to release
-        if: ${{ github.event_name == 'release' }}
-        uses: softprops/action-gh-release@v2
+      - name: Upload APK artifact
+        if: ${{ steps.package_outputs.outputs.package_apk != '' }}
+        uses: actions/upload-artifact@v7
         with:
-          files: ${{ steps.package_outputs.outputs.package_path }}
+          name: ${{ steps.package_outputs.outputs.package_apk_name }}
+          path: ${{ steps.package_outputs.outputs.package_apk }}
+          if-no-files-found: error
+          compression-level: 0
 
   publish-latest-release:
     runs-on: ubuntu-latest
     needs: [ build ]
-    env:
-      GH_REPO: ${{ github.repository }}
     steps:
       - name: Download build artifacts
         uses: actions/download-artifact@v8
@@ -128,31 +171,39 @@ jobs:
             core.setOutput('id', String(picked.id));
             core.setOutput('tag', picked.tag_name);
 
-      - name: Remove previous ipk assets
+      - name: Remove previous package assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_ID: ${{ steps.target-release.outputs.id }}
         run: |
           gh api "repos/${{ github.repository }}/releases/${RELEASE_ID}/assets" \
-            --jq '.[] | select(.name | test("^tg-ws-proxy.*\\.ipk$")) | .id' \
+            --jq '.[] | select(.name | test("^tg-ws-proxy.*\\.(ipk|apk|pem)$")) | .id' \
             | while read -r asset_id; do
                 [ -n "$asset_id" ] || continue
                 gh api -X DELETE "repos/${{ github.repository }}/releases/assets/${asset_id}"
               done
 
-      - name: Upload new ipk assets to latest release
+      - name: Prepare APK public key asset
+        env:
+          OPENWRT_APK_PUBLIC_KEY: ${{ secrets.OPENWRT_APK_PUBLIC_KEY }}
+        run: |
+          if [ -n "$OPENWRT_APK_PUBLIC_KEY" ]; then
+            printf '%s' "$OPENWRT_APK_PUBLIC_KEY" > out/tg-ws-proxy.pem
+          fi
+
+      - name: Upload new package assets to latest release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.target-release.outputs.tag }}
         run: |
-          mapfile -t files < <(find out -type f -name 'tg-ws-proxy_*.ipk' | sort)
+          mapfile -t files < <(find out -type f \( -name 'tg-ws-proxy_*.ipk' -o -name 'tg-ws-proxy_*.apk' -o -name '*.pem' \) | sort)
           if [ ${#files[@]} -eq 0 ]; then
-            echo "No ipk files found"
+            echo "No package files found"
             exit 1
           fi
 
           printf '%s\n' "${files[@]}"
-          gh release upload "$TAG" "${files[@]}" --clobber
+          gh release upload "$TAG" "${files[@]}" --clobber --repo "${{ github.repository }}"
 
       - name: Dispatch to feedly
         if: success()

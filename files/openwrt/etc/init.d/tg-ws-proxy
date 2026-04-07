@@ -3,17 +3,32 @@
 USE_PROCD=1
 START=66
 
-script=$(readlink "$initscript")
-NAME="$(basename ${script:-$initscript})"
+NAME="tg-ws-proxy"
 PROG="/usr/bin/tg-ws-proxy"
+CONFFILE="/etc/tg-ws-proxy.conf"
+LOGFILE="/var/log/tg-ws-proxy.log"
+
+load_config() {
+        [ -f "$CONFFILE" ] || {
+                echo "Config file not found: $CONFFILE"
+                return 1
+        }
+
+        . "$CONFFILE"
+
+        [ -n "$SECRET" ] || {
+                echo "SECRET is empty in $CONFFILE"
+                return 1
+        }
+
+        [ -n "${DC_IP_DEFAULT_POOL+x}" ] || DC_IP_DEFAULT_POOL=""
+        return 0
+}
 
 print_link() {
-        local conffile link_host br_ip
+        local link_host br_ip
 
-        conffile="/etc/tg-ws-proxy.conf"
-        [ -f "$conffile" ] || return 1
-
-        . "$conffile"
+        load_config || return 1
         [ -n "$HOST" ] && [ -n "$PORT" ] && [ -n "$SECRET" ] || return 1
 
         link_host="$HOST"
@@ -33,22 +48,43 @@ start_service() {
         config_get_bool enabled "main" "enabled" "0"
         [ "$enabled" -eq "1" ] || return 0
 
+        load_config || return 1
+
         config_get user "main" "user" "root"
 
         procd_open_instance "$NAME.main"
-        procd_set_param command "$PROG"
+        procd_set_param command "$PROG" \
+                --host "$HOST" \
+                --port "$PORT" \
+                --secret "$SECRET" \
+                --dc-ip-default "$DC_IP_DEFAULT" \
+                --dc-ip-default-pool "$DC_IP_DEFAULT_POOL"
+
+        if [ -n "$EXTRA_ARGS" ]; then
+                set -- $EXTRA_ARGS
+                while [ "$#" -gt 0 ]; do
+                        procd_append_param command "$1"
+                        shift
+                done
+        fi
+
+        if [ "$LOG_LEVEL" = "1" ]; then
+                procd_append_param command --log-file "$LOGFILE"
+        fi
 
         procd_set_param stdout 1
         procd_set_param stderr 1
+        procd_set_param user "$user"
         procd_set_param respawn
-
         procd_close_instance
+        print_link
+        return 0
 }
 
 status_service() {
         if [ -n "$(pidof tg-ws-proxy 2>/dev/null)" ]; then
                 echo "tg-ws-proxy is running"
-                print_link || true
+                print_link
                 return 0
         fi
 
