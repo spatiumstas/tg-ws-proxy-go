@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 )
@@ -24,8 +25,11 @@ func parseFlags() (*Config, error) {
 	bufKB := flag.Int("buf-kb", 256, "Socket buffer size in KB")
 	poolSize := flag.Int("pool-size", 4, "WS pool size per DC")
 	cfproxyDomain := flag.String("cfproxy-domain", defaultCFProxyDomain, "Cloudflare-proxied domain for WS fallback")
+	cfproxyDomains := flag.String("cfproxy-domains", "", "Comma-separated Cloudflare proxy domain pool for WS fallback")
 	noCfproxy := flag.Bool("no-cfproxy", false, "Disable Cloudflare proxy fallback")
 	cfproxyPriority := flag.Bool("cfproxy-priority", true, "Try cfproxy before TCP fallback")
+	noCfproxyDomainRefresh := flag.Bool("no-cfproxy-domain-refresh", false, "Disable one-shot CF proxy domain refresh from GitHub at startup")
+	cfproxyDomainsURL := flag.String("cfproxy-domains-url", defaultCFProxyDomainsURL, "URL to fetch CF proxy domain list from")
 	maxConns := flag.Int("max-conns", defaultMaxConns, "Max concurrent client sessions")
 	dcIPDefault := flag.String("dc-ip-default", "149.154.167.220", "Default WS target IP for all implicit DCs when --dc-ip is not provided")
 	dcIPDefaultPool := flag.String("dc-ip-default-pool", "", "Default WS target IP pool for implicit DCs, comma-separated")
@@ -109,6 +113,40 @@ func parseFlags() (*Config, error) {
 		dcMap[dc] = dcPool[dc][0]
 	}
 
+	userDomainProvided := flagProvided("cfproxy-domain")
+	userPoolProvided := strings.TrimSpace(*cfproxyDomains) != ""
+	userDomain := normalizeCFProxyDomain(*cfproxyDomain)
+
+	domainPool := defaultCFProxyDomains()
+	if userPoolProvided {
+		if userDomainProvided {
+			return nil, errors.New("use only one of --cfproxy-domain or --cfproxy-domains")
+		}
+		parsedDomains, err := parseCFProxyDomainCSV(*cfproxyDomains)
+		if err != nil {
+			return nil, fmt.Errorf("invalid --cfproxy-domains: %w", err)
+		}
+		domainPool = parsedDomains
+	}
+
+	if userDomainProvided {
+		if strings.Contains(userDomain, ",") {
+			return nil, errors.New("invalid --cfproxy-domain: multiple domains are not allowed; use --cfproxy-domains for comma-separated pool")
+		}
+		if userDomain == "" {
+			return nil, errors.New("invalid --cfproxy-domain: empty domain")
+		}
+		domainPool = []string{userDomain}
+	} else if !userPoolProvided && userDomain != "" {
+		domainPool = appendUniqueDomains(domainPool, userDomain)
+	}
+
+	activeDomain := chooseActiveDomain(domainPool)
+	fallbackCFProxyDomain := activeDomain
+	if fallbackCFProxyDomain == "" && len(domainPool) > 0 {
+		fallbackCFProxyDomain = domainPool[0]
+	}
+
 	return &Config{
 		Host:        *host,
 		Port:        *port,
@@ -118,7 +156,12 @@ func parseFlags() (*Config, error) {
 		DCPool:      dcPool,
 		FallbackCFProxy:         !*noCfproxy,
 		FallbackCFProxyPriority: *cfproxyPriority,
-		FallbackCFProxyDomain:   strings.TrimSpace(*cfproxyDomain),
+		FallbackCFProxyDomain:   fallbackCFProxyDomain,
+		FallbackCFProxyUserDomain: (userDomainProvided && userDomain != "") || userPoolProvided,
+		FallbackCFProxyRefresh:    !*noCfproxyDomainRefresh,
+		FallbackCFProxyDomainsURL: strings.TrimSpace(*cfproxyDomainsURL),
+		FallbackCFProxyDomains:    domainPool,
+		FallbackCFProxyActive:     activeDomain,
 		Verbose:     *verbose,
 		BufKB:       maxInt(*bufKB, 4),
 		PoolSize:    maxInt(*poolSize, 0),
@@ -171,4 +214,14 @@ func appendUniqueIP(dst []string, ip string) []string {
 		}
 	}
 	return append(dst, ip)
+}
+
+func flagProvided(name string) bool {
+	key := "--" + name
+	for _, arg := range os.Args[1:] {
+		if arg == key || strings.HasPrefix(arg, key+"=") {
+			return true
+		}
+	}
+	return false
 }

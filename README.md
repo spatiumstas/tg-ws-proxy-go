@@ -50,6 +50,7 @@ EXTRA_ARGS=""
 1. `SECRET` must be 32 hex chars. If empty, it is auto-generated during install.
 2. `DC_IP_DEFAULT` and `DC_IP_DEFAULT_POOL` are global defaults for implicit DC map (`2,4`).
 3. `EXTRA_ARGS` is for per-DC overrides and extra runtime flags, [CFProxy](https://github.com/Flowseal/tg-ws-proxy/blob/main/docs/CfProxy.md)
+4. Full list of available commands `--help`
 
 Override examples:
 

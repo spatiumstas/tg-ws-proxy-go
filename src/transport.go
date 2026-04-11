@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -279,21 +278,14 @@ func dialWSByDomain(domain string, timeout time.Duration) (*websocket.Conn, *htt
 	return dialer.Dial(u.String(), headers)
 }
 
-func cfproxyDomains(dc int, base string) []string {
-	b := strings.TrimSpace(base)
-	if b == "" {
-		return nil
-	}
-	return []string{fmt.Sprintf("kws%d.%s", dc, b)}
-}
-
-func cfproxyFallback(label string, dc int, isMedia bool, domainBase string, client net.Conn, relayInit []byte, cltDec, cltEnc, tgEnc, tgDec cipher.Stream, splitter *msgSplitter) error {
+func cfproxyFallback(label string, cfg *Config, dc int, isMedia bool, client net.Conn, relayInit []byte, cltDec, cltEnc, tgEnc, tgDec cipher.Stream, splitter *msgSplitter) error {
 	mediaTag := ""
 	if isMedia {
 		mediaTag = " media"
 	}
 
-	for _, domain := range cfproxyDomains(dc, domainBase) {
+	for _, baseDomain := range cfg.cfproxyDomainsForTry() {
+		domain := fmt.Sprintf("kws%d.%s", dc, baseDomain)
 		logf("INFO   [%s] DC%d%s -> CF proxy wss://%s/apiws", label, dc, mediaTag, domain)
 		ws, resp, err := dialWSByDomain(domain, 10*time.Second)
 		if err != nil {
@@ -313,6 +305,7 @@ func cfproxyFallback(label string, dc int, isMedia bool, domainBase string, clie
 		}
 
 		atomic.AddInt64(&stats.connectionsCF, 1)
+		cfg.promoteCFProxyDomain(baseDomain)
 		bridgeWS(label, dc, isMedia, client, ws, cltDec, cltEnc, tgEnc, tgDec, splitter)
 		return nil
 	}

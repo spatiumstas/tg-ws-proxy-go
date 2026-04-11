@@ -26,6 +26,7 @@ func main() {
 
 	initLogger(cfg)
 	startPprof(cfg)
+	startCFProxyDomainRefresh(cfg)
 
 	linkHost := getLinkHost(cfg.Host)
 	log.Printf("INFO   %s", strings.Repeat("=", 60))
@@ -42,7 +43,11 @@ func main() {
 		if cfg.FallbackCFProxyPriority {
 			prio = "CF first"
 		}
-		log.Printf("INFO     CF proxy:      %s (%s)", cfg.FallbackCFProxyDomain, prio)
+		refreshMode := "off"
+		if cfg.FallbackCFProxyRefresh && !cfg.FallbackCFProxyUserDomain {
+			refreshMode = "startup"
+		}
+		log.Printf("INFO     CF proxy:      active=%s pool=%d (%s, refresh=%s)", cfg.cfproxyActiveDomain(), cfg.cfproxyDomainPoolSize(), prio, refreshMode)
 	}
 	log.Printf("INFO   %s", strings.Repeat("=", 60))
 	log.Printf("INFO     Connect link:")
@@ -164,10 +169,10 @@ func handleClient(client net.Conn, cfg *Config, secret []byte) {
 			fallback = primaryTarget
 		}
 
-		useCF := cfg.FallbackCFProxy && strings.TrimSpace(cfg.FallbackCFProxyDomain) != ""
+		useCF := cfg.FallbackCFProxy && cfg.hasCFProxyDomains()
 		tryCF := func() bool {
 			splitter := newFallbackSplitter()
-			if err := cfproxyFallback(label, hi.DC, hi.IsMedia, cfg.FallbackCFProxyDomain, client, relayInit, cltDec, cltEnc, tgEnc, tgDec, splitter); err == nil {
+			if err := cfproxyFallback(label, cfg, hi.DC, hi.IsMedia, client, relayInit, cltDec, cltEnc, tgEnc, tgDec, splitter); err == nil {
 				log.Printf("INFO   [%s] DC%d%s CF proxy fallback closed", label, hi.DC, mediaTag)
 				return true
 			}

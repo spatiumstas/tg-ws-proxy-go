@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"sync"
 	"sync/atomic"
 )
 
@@ -15,6 +16,11 @@ type Config struct {
 	FallbackCFProxy         bool
 	FallbackCFProxyPriority bool
 	FallbackCFProxyDomain   string
+	FallbackCFProxyUserDomain bool
+	FallbackCFProxyRefresh    bool
+	FallbackCFProxyDomainsURL string
+	FallbackCFProxyDomains    []string
+	FallbackCFProxyActive     string
 	Verbose     bool
 	BufKB       int
 	PoolSize    int
@@ -23,6 +29,7 @@ type Config struct {
 	LogMaxMB    float64
 	LogBackups  int
 	PprofListen string
+	cfproxyMu   sync.RWMutex
 }
 
 type Stats struct {
