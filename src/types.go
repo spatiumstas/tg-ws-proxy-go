@@ -11,6 +11,7 @@ type Config struct {
 	Port        int
 	SecretHex   string
 	GenSecret   bool
+	FakeTLSDomain string
 	DCMap       map[int]string
 	DCPool      map[int][]string
 	FallbackCFProxy         bool

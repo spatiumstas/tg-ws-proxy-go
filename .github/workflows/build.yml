@@ -60,6 +60,11 @@ jobs:
           cache: true
           cache-dependency-path: src/go.sum
 
+      - name: Install dos2unix
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dos2unix
+
       - name: Install apk-tools
         if: ${{ startsWith(matrix.config, 'config/openwrt/') }}
         run: |
@@ -130,6 +135,7 @@ jobs:
           path: ${{ steps.package_outputs.outputs.package_ipk }}
           if-no-files-found: error
           compression-level: 0
+          retention-days: 1
 
       - name: Upload APK artifact
         if: ${{ steps.package_outputs.outputs.package_apk != '' }}
@@ -139,6 +145,7 @@ jobs:
           path: ${{ steps.package_outputs.outputs.package_apk }}
           if-no-files-found: error
           compression-level: 0
+          retention-days: 1
 
   publish-latest-release:
     runs-on: ubuntu-latest

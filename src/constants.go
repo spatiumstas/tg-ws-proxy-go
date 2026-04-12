@@ -25,8 +25,8 @@ const (
 	acceptBackoffMax  = 1 * time.Second
 	defaultMaxConns   = 1024
 	defaultCFProxyDomain = "pclead.co.uk"
-	defaultCFProxyDomainsURL = "https://raw.githubusercontent.com/Flowseal/tg-ws-proxy/main/.github/cfproxy-domains.txt"
 	defaultCFProxyRefreshTimeout = 10 * time.Second
+	defaultCFProxyRefreshInterval = 1 * time.Hour
 )
 
 var (

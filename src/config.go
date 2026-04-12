@@ -24,12 +24,13 @@ func parseFlags() (*Config, error) {
 	logBackups := flag.Int("log-backups", 0, "Number of rotated backups")
 	bufKB := flag.Int("buf-kb", 256, "Socket buffer size in KB")
 	poolSize := flag.Int("pool-size", 4, "WS pool size per DC")
+	fakeTLSDomain := flag.String("fake-tls-domain", "", "Enable Fake TLS (ee-secret) with masking domain")
 	cfproxyDomain := flag.String("cfproxy-domain", defaultCFProxyDomain, "Cloudflare-proxied domain for WS fallback")
 	cfproxyDomains := flag.String("cfproxy-domains", "", "Comma-separated Cloudflare proxy domain pool for WS fallback")
 	noCfproxy := flag.Bool("no-cfproxy", false, "Disable Cloudflare proxy fallback")
 	cfproxyPriority := flag.Bool("cfproxy-priority", true, "Try cfproxy before TCP fallback")
-	noCfproxyDomainRefresh := flag.Bool("no-cfproxy-domain-refresh", false, "Disable one-shot CF proxy domain refresh from GitHub at startup")
-	cfproxyDomainsURL := flag.String("cfproxy-domains-url", defaultCFProxyDomainsURL, "URL to fetch CF proxy domain list from")
+	noCfproxyDomainRefresh := flag.Bool("no-cfproxy-domain-refresh", false, "Disable periodic CF proxy domain refresh from URL")
+	cfproxyDomainsURL := flag.String("cfproxy-domains-url", "", "URL to fetch CF proxy domain list from")
 	maxConns := flag.Int("max-conns", defaultMaxConns, "Max concurrent client sessions")
 	dcIPDefault := flag.String("dc-ip-default", "149.154.167.220", "Default WS target IP for all implicit DCs when --dc-ip is not provided")
 	dcIPDefaultPool := flag.String("dc-ip-default-pool", "", "Default WS target IP pool for implicit DCs, comma-separated")
@@ -147,11 +148,17 @@ func parseFlags() (*Config, error) {
 		fallbackCFProxyDomain = domainPool[0]
 	}
 
+	normalizedFakeTLSDomain := normalizeCFProxyDomain(*fakeTLSDomain)
+	if normalizedFakeTLSDomain != "" && !isLikelyDomain(normalizedFakeTLSDomain) {
+		return nil, fmt.Errorf("invalid --fake-tls-domain: %s", *fakeTLSDomain)
+	}
+
 	return &Config{
 		Host:        *host,
 		Port:        *port,
 		SecretHex:   *secret,
 		GenSecret:   *genSecret,
+		FakeTLSDomain: normalizedFakeTLSDomain,
 		DCMap:       dcMap,
 		DCPool:      dcPool,
 		FallbackCFProxy:         !*noCfproxy,

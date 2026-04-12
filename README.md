@@ -42,6 +42,7 @@ SECRET=
 LOG_LEVEL=0
 DC_IP_DEFAULT=149.154.167.220
 DC_IP_DEFAULT_POOL=""
+FAKE_TLS_DOMAIN=""
 EXTRA_ARGS=""
 ```
 
@@ -51,6 +52,8 @@ EXTRA_ARGS=""
 2. `DC_IP_DEFAULT` and `DC_IP_DEFAULT_POOL` are global defaults for implicit DC map (`2,4`).
 3. `EXTRA_ARGS` is for per-DC overrides and extra runtime flags, [CFProxy](https://github.com/Flowseal/tg-ws-proxy/blob/main/docs/CfProxy.md)
 4. Full list of available commands `--help`
+5. `FAKE_TLS_DOMAIN` enables Fake TLS mode (`ee` secret link). Keep empty for standard `dd` mode.
+6. `CFPROXY_DOMAINS_URL` [default value](https://raw.githubusercontent.com/Flowseal/tg-ws-proxy/main/.github/cfproxy-domains.txt)
 
 Override examples:
 
@@ -61,8 +64,8 @@ EXTRA_ARGS="--dc-ip-pool 2:149.154.175.50,149.154.167.220"
 # Per-DC single IP override (DC203) + verbose logs
 EXTRA_ARGS="--dc-ip 203:91.105.192.100 -v"
 
-# CF Proxy
-EXTRA_ARGS="--cfproxy-domain your-domain.tld"
+# Fake TLS mode (ee-secret)
+FAKE_TLS_DOMAIN="example.com"
 ```
 
 ### Run

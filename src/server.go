@@ -33,6 +33,9 @@ func main() {
 	log.Printf("INFO     Telegram MTProto WS Bridge Proxy (Go)")
 	log.Printf("INFO     Listening on   %s:%d", cfg.Host, cfg.Port)
 	log.Printf("INFO     Secret:        %s", cfg.SecretHex)
+	if cfg.FakeTLSDomain != "" {
+		log.Printf("INFO     Fake TLS:      %s", cfg.FakeTLSDomain)
+	}
 	log.Printf("INFO     Target DC IPs:")
 	for _, item := range sortedDCMap(cfg.DCMap) {
 		dc, ip := item.dc, item.ip
@@ -44,14 +47,18 @@ func main() {
 			prio = "CF first"
 		}
 		refreshMode := "off"
-		if cfg.FallbackCFProxyRefresh && !cfg.FallbackCFProxyUserDomain {
+		if cfg.FallbackCFProxyRefresh && !cfg.FallbackCFProxyUserDomain && strings.TrimSpace(cfg.FallbackCFProxyDomainsURL) != "" {
 			refreshMode = "startup"
 		}
 		log.Printf("INFO     CF proxy:      active=%s pool=%d (%s, refresh=%s)", cfg.cfproxyActiveDomain(), cfg.cfproxyDomainPoolSize(), prio, refreshMode)
 	}
 	log.Printf("INFO   %s", strings.Repeat("=", 60))
 	log.Printf("INFO     Connect link:")
-	log.Printf("INFO       tg://proxy?server=%s&port=%d&secret=dd%s", linkHost, cfg.Port, cfg.SecretHex)
+	if cfg.FakeTLSDomain != "" {
+		log.Printf("INFO       %s", fakeTLSConnectLink(linkHost, cfg.Port, cfg.SecretHex, cfg.FakeTLSDomain))
+	} else {
+		log.Printf("INFO       tg://proxy?server=%s&port=%d&secret=dd%s", linkHost, cfg.Port, cfg.SecretHex)
+	}
 	log.Printf("INFO   %s", strings.Repeat("=", 60))
 
 	go func() {
@@ -117,13 +124,30 @@ func handleClient(client net.Conn, cfg *Config, secret []byte) {
 
 	_ = setSockOpts(client, cfg.BufKB*1024)
 
-	_ = client.SetReadDeadline(time.Now().Add(10 * time.Second))
+	handshakeConn := client
+	if cfg.FakeTLSDomain != "" {
+		fconn, hs, ok := acceptFakeTLSClient(client, secret, cfg.FakeTLSDomain, label)
+		if !ok {
+			return
+		}
+		handshakeConn = fconn
+		hi, ok := tryHandshake(hs, secret)
+		if !ok {
+			atomic.AddInt64(&stats.connectionsBad, 1)
+			debugf(cfg, "[%s] bad handshake", label)
+			return
+		}
+		handleMTProtoClient(handshakeConn, cfg, hi, secret, label)
+		return
+	}
+
+	_ = handshakeConn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	hs := make([]byte, handshakeLen)
-	if _, err := io.ReadFull(client, hs); err != nil {
+	if _, err := io.ReadFull(handshakeConn, hs); err != nil {
 		debugf(cfg, "[%s] client disconnected before handshake", label)
 		return
 	}
-	_ = client.SetReadDeadline(time.Time{})
+	_ = handshakeConn.SetReadDeadline(time.Time{})
 
 	hi, ok := tryHandshake(hs, secret)
 	if !ok {
@@ -131,6 +155,10 @@ func handleClient(client net.Conn, cfg *Config, secret []byte) {
 		debugf(cfg, "[%s] bad handshake", label)
 		return
 	}
+	handleMTProtoClient(handshakeConn, cfg, hi, secret, label)
+}
+
+func handleMTProtoClient(client net.Conn, cfg *Config, hi *handshakeInfo, secret []byte, label string) {
 
 	protoInt := protoFromTag(hi.ProtoTag)
 	mediaTag := ""

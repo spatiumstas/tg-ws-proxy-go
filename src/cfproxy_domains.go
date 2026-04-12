@@ -184,19 +184,28 @@ func cacheBustURL(raw string) (string, error) {
 }
 
 func startCFProxyDomainRefresh(cfg *Config) {
-	if cfg == nil || !cfg.FallbackCFProxy || !cfg.FallbackCFProxyRefresh || cfg.FallbackCFProxyUserDomain {
+	if cfg == nil || !cfg.FallbackCFProxy || !cfg.FallbackCFProxyRefresh || cfg.FallbackCFProxyUserDomain || strings.TrimSpace(cfg.FallbackCFProxyDomainsURL) == "" {
 		return
 	}
-	log.Printf("INFO   CF proxy domain refresh scheduled (startup): %s", cfg.FallbackCFProxyDomainsURL)
+	log.Printf("INFO   CF proxy domain refresh scheduled: url=%s interval=%s", cfg.FallbackCFProxyDomainsURL, defaultCFProxyRefreshInterval)
 
 	go func() {
-		domains, err := fetchCFProxyDomains(cfg.FallbackCFProxyDomainsURL, defaultCFProxyRefreshTimeout)
-		if err != nil {
-			log.Printf("WARN   CF proxy domain refresh failed: %v", err)
-			return
+		refresh := func() {
+			domains, err := fetchCFProxyDomains(cfg.FallbackCFProxyDomainsURL, defaultCFProxyRefreshTimeout)
+			if err != nil {
+				log.Printf("WARN   CF proxy domain refresh failed: %v", err)
+				return
+			}
+			cfg.setCFProxyDomains(domains)
+			log.Printf("INFO   CF proxy domain pool updated from GitHub (%d domains): %s", len(domains), strings.Join(domains, ", "))
 		}
-		cfg.setCFProxyDomains(domains)
-		log.Printf("INFO   CF proxy domain pool updated from GitHub (%d domains): %s", len(domains), strings.Join(domains, ", "))
+
+		refresh()
+		ticker := time.NewTicker(defaultCFProxyRefreshInterval)
+		defer ticker.Stop()
+		for range ticker.C {
+			refresh()
+		}
 	}()
 }
 

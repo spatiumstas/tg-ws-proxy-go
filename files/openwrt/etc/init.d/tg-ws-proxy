@@ -22,6 +22,9 @@ load_config() {
         }
 
         [ -n "${DC_IP_DEFAULT_POOL+x}" ] || DC_IP_DEFAULT_POOL=""
+        [ -n "${CFPROXY_DOMAINS+x}" ] || CFPROXY_DOMAINS=""
+        [ -n "${CFPROXY_DOMAINS_URL+x}" ] || CFPROXY_DOMAINS_URL=""
+        [ -n "${FAKE_TLS_DOMAIN+x}" ] || FAKE_TLS_DOMAIN=""
         return 0
 }
 
@@ -38,7 +41,12 @@ print_link() {
                 [ -n "$br_ip" ] && link_host="$br_ip"
         fi
 
-        echo "Connect link: tg://proxy?server=$link_host&port=$PORT&secret=dd$SECRET"
+        if [ -n "$FAKE_TLS_DOMAIN" ]; then
+                domain_hex="$(printf '%s' "$FAKE_TLS_DOMAIN" | od -An -tx1 2>/dev/null | tr -d ' \n')"
+                echo "Connect link: tg://proxy?server=$link_host&port=$PORT&secret=ee$SECRET$domain_hex"
+        else
+                echo "Connect link: tg://proxy?server=$link_host&port=$PORT&secret=dd$SECRET"
+        fi
 }
 
 start_service() {
@@ -59,6 +67,16 @@ start_service() {
                 --secret "$SECRET" \
                 --dc-ip-default "$DC_IP_DEFAULT" \
                 --dc-ip-default-pool "$DC_IP_DEFAULT_POOL"
+
+        if [ -n "$CFPROXY_DOMAINS" ]; then
+                procd_append_param command --cfproxy-domains "$CFPROXY_DOMAINS"
+        fi
+        if [ -n "$CFPROXY_DOMAINS_URL" ]; then
+                procd_append_param command --cfproxy-domains-url "$CFPROXY_DOMAINS_URL"
+        fi
+        if [ -n "$FAKE_TLS_DOMAIN" ]; then
+                procd_append_param command --fake-tls-domain "$FAKE_TLS_DOMAIN"
+        fi
 
         if [ -n "$EXTRA_ARGS" ]; then
                 set -- $EXTRA_ARGS
