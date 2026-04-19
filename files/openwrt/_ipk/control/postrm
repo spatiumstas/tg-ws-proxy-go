@@ -5,6 +5,7 @@ set -e
 
 rm -f /usr/bin/tg-ws-proxy
 rm -f /etc/init.d/tg-ws-proxy
-rm -f /etc/tg-ws-proxy.conf-opkg
+rm -rf /etc/tg-ws-proxy
+rm -f /var/log/tg-ws-proxy.log
 
 echo "tg-ws-proxy removed"

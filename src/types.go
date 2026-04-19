@@ -22,6 +22,7 @@ type Config struct {
 	FallbackCFProxyDomainsURL string
 	FallbackCFProxyDomains    []string
 	FallbackCFProxyActive     string
+	FallbackCFProxyPerDCActive map[int]string
 	Verbose     bool
 	BufKB       int
 	PoolSize    int

@@ -9,7 +9,9 @@ ACTION=$1
 CALLER=$2
 
 PROG=/opt/bin/tg-ws-proxy
-CONFFILE=/opt/etc/tg-ws-proxy.conf
+CONFIG_DIR=/opt/etc/tg-ws-proxy
+CONFIG_FILE=$CONFIG_DIR/config.conf
+SECRET_FILE=$CONFIG_DIR/secret.conf
 LOGFILE=/opt/var/log/tg-ws-proxy.log
 
 ansi_red="\033[1;31m";
@@ -20,13 +22,18 @@ ansi_blue="\033[1;34m";
 ansi_std="\033[m";
 
 load_config() {
-  if [ ! -f "$CONFFILE" ]; then
-    echo "Config file not found: $CONFFILE" >&2
+  if [ ! -f "$CONFIG_FILE" ]; then
+    echo "Config file not found: $CONFIG_FILE" >&2
+    return 1
+  fi
+  if [ ! -f "$SECRET_FILE" ]; then
+    echo "Secret file not found: $SECRET_FILE" >&2
     return 1
   fi
 
-  . "$CONFFILE"
-  [ -n "${CFPROXY_DOMAINS+x}" ] || CFPROXY_DOMAINS=""
+  . "$CONFIG_FILE"
+  . "$SECRET_FILE"
+  [ -n "${CFPROXY_FALLBACK_DOMAINS+x}" ] || CFPROXY_FALLBACK_DOMAINS=""
   [ -n "${CFPROXY_DOMAINS_URL+x}" ] || CFPROXY_DOMAINS_URL=""
   [ -n "${FAKE_TLS_DOMAIN+x}" ] || FAKE_TLS_DOMAIN=""
   return 0
@@ -34,7 +41,7 @@ load_config() {
 
 print_link() {
     if [ -z "$HOST" ] || [ -z "$PORT" ] || [ -z "$SECRET" ]; then
-      echo "Missing HOST/PORT/SECRET in $CONFFILE" >&2
+      echo "Missing HOST/PORT/SECRET in config files" >&2
       return 1
     fi
 
@@ -58,7 +65,7 @@ start() {
   load_config || return 1
 
   if [ -z "$SECRET" ]; then
-    echo "SECRET is empty in $CONFFILE" >&2
+    echo "SECRET is empty in $SECRET_FILE" >&2
     return 1
   fi
 
@@ -70,8 +77,8 @@ start() {
   fi
 
   cf_args=""
-  if [ -n "$CFPROXY_DOMAINS" ]; then
-    cf_args="$cf_args --cfproxy-domains $CFPROXY_DOMAINS"
+  if [ -n "$CFPROXY_FALLBACK_DOMAINS" ]; then
+    cf_args="$cf_args --cfproxy-domains $CFPROXY_FALLBACK_DOMAINS"
   fi
   if [ -n "$CFPROXY_DOMAINS_URL" ]; then
     cf_args="$cf_args --cfproxy-domains-url $CFPROXY_DOMAINS_URL"

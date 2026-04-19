@@ -5,24 +5,32 @@ START=66
 
 NAME="tg-ws-proxy"
 PROG="/usr/bin/tg-ws-proxy"
-CONFFILE="/etc/tg-ws-proxy.conf"
+CONFIG_DIR="/etc/tg-ws-proxy"
+CONFIG_FILE="$CONFIG_DIR/config.conf"
+SECRET_FILE="$CONFIG_DIR/secret.conf"
 LOGFILE="/var/log/tg-ws-proxy.log"
 
 load_config() {
-        [ -f "$CONFFILE" ] || {
-                echo "Config file not found: $CONFFILE"
+        [ -f "$CONFIG_FILE" ] || {
+                echo "Config file not found: $CONFIG_FILE"
                 return 1
         }
 
-        . "$CONFFILE"
+        [ -f "$SECRET_FILE" ] || {
+                echo "Secret file not found: $SECRET_FILE"
+                return 1
+        }
+
+        . "$CONFIG_FILE"
+        . "$SECRET_FILE"
 
         [ -n "$SECRET" ] || {
-                echo "SECRET is empty in $CONFFILE"
+                echo "SECRET is empty in $SECRET_FILE"
                 return 1
         }
 
         [ -n "${DC_IP_DEFAULT_POOL+x}" ] || DC_IP_DEFAULT_POOL=""
-        [ -n "${CFPROXY_DOMAINS+x}" ] || CFPROXY_DOMAINS=""
+        [ -n "${CFPROXY_FALLBACK_DOMAINS+x}" ] || CFPROXY_FALLBACK_DOMAINS=""
         [ -n "${CFPROXY_DOMAINS_URL+x}" ] || CFPROXY_DOMAINS_URL=""
         [ -n "${FAKE_TLS_DOMAIN+x}" ] || FAKE_TLS_DOMAIN=""
         return 0
@@ -68,8 +76,8 @@ start_service() {
                 --dc-ip-default "$DC_IP_DEFAULT" \
                 --dc-ip-default-pool "$DC_IP_DEFAULT_POOL"
 
-        if [ -n "$CFPROXY_DOMAINS" ]; then
-                procd_append_param command --cfproxy-domains "$CFPROXY_DOMAINS"
+        if [ -n "$CFPROXY_FALLBACK_DOMAINS" ]; then
+                procd_append_param command --cfproxy-domains "$CFPROXY_FALLBACK_DOMAINS"
         fi
         if [ -n "$CFPROXY_DOMAINS_URL" ]; then
                 procd_append_param command --cfproxy-domains-url "$CFPROXY_DOMAINS_URL"

@@ -20,7 +20,8 @@ var (
 func defaultCFProxyDomains() []string {
 	out := make([]string, 0, len(cfProxyDefaultDomainPool))
 	for _, domain := range cfProxyDefaultDomainPool {
-		if normalized := normalizeCFProxyDomain(domain); normalized != "" {
+		decoded := decodeCFProxyDomain(domain)
+		if normalized := normalizeCFProxyDomain(decoded); normalized != "" {
 			out = appendUniqueDomains(out, normalized)
 		}
 	}
@@ -77,6 +78,20 @@ func chooseActiveDomain(domains []string) string {
 	cfRandMu.Lock()
 	defer cfRandMu.Unlock()
 	return domains[cfRand.Intn(len(domains))]
+}
+
+func shuffledDomains(domains []string) []string {
+	out := append([]string(nil), domains...)
+	if len(out) <= 1 {
+		return out
+	}
+
+	cfRandMu.Lock()
+	cfRand.Shuffle(len(out), func(i, j int) {
+		out[i], out[j] = out[j], out[i]
+	})
+	cfRandMu.Unlock()
+	return out
 }
 
 func isLikelyDomain(domain string) bool {
@@ -215,7 +230,7 @@ func (cfg *Config) hasCFProxyDomains() bool {
 	return len(cfg.FallbackCFProxyDomains) > 0
 }
 
-func (cfg *Config) cfproxyDomainsForTry() []string {
+func (cfg *Config) cfproxyDomainsForTry(dc int) []string {
 	cfg.cfproxyMu.RLock()
 	defer cfg.cfproxyMu.RUnlock()
 
@@ -223,7 +238,10 @@ func (cfg *Config) cfproxyDomainsForTry() []string {
 		return nil
 	}
 
-	active := normalizeCFProxyDomain(cfg.FallbackCFProxyActive)
+	active := normalizeCFProxyDomain(cfg.FallbackCFProxyPerDCActive[dc])
+	if active == "" {
+		active = normalizeCFProxyDomain(cfg.FallbackCFProxyActive)
+	}
 	out := make([]string, 0, len(cfg.FallbackCFProxyDomains))
 
 	if active != "" {
@@ -234,7 +252,7 @@ func (cfg *Config) cfproxyDomainsForTry() []string {
 			}
 		}
 	}
-	for _, domain := range cfg.FallbackCFProxyDomains {
+	for _, domain := range shuffledDomains(cfg.FallbackCFProxyDomains) {
 		if domain != active {
 			out = append(out, domain)
 		}
@@ -253,13 +271,19 @@ func (cfg *Config) setCFProxyDomains(domains []string) {
 	cfg.cfproxyMu.Lock()
 	cfg.FallbackCFProxyDomains = pool
 	cfg.FallbackCFProxyActive = active
+	if cfg.FallbackCFProxyPerDCActive == nil {
+		cfg.FallbackCFProxyPerDCActive = make(map[int]string)
+	}
+	for _, dc := range cfProxyKnownDCs {
+		cfg.FallbackCFProxyPerDCActive[dc] = chooseActiveDomain(pool)
+	}
 	if active != "" {
 		cfg.FallbackCFProxyDomain = active
 	}
 	cfg.cfproxyMu.Unlock()
 }
 
-func (cfg *Config) promoteCFProxyDomain(domain string) {
+func (cfg *Config) promoteCFProxyDomain(dc int, domain string) {
 	normalized := normalizeCFProxyDomain(domain)
 	if normalized == "" {
 		return
@@ -269,6 +293,10 @@ func (cfg *Config) promoteCFProxyDomain(domain string) {
 	defer cfg.cfproxyMu.Unlock()
 	for _, existing := range cfg.FallbackCFProxyDomains {
 		if existing == normalized {
+			if cfg.FallbackCFProxyPerDCActive == nil {
+				cfg.FallbackCFProxyPerDCActive = make(map[int]string)
+			}
+			cfg.FallbackCFProxyPerDCActive[dc] = normalized
 			cfg.FallbackCFProxyActive = normalized
 			cfg.FallbackCFProxyDomain = normalized
 			return

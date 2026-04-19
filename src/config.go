@@ -142,18 +142,12 @@ func parseFlags() (*Config, error) {
 		domainPool = appendUniqueDomains(domainPool, userDomain)
 	}
 
-	activeDomain := chooseActiveDomain(domainPool)
-	fallbackCFProxyDomain := activeDomain
-	if fallbackCFProxyDomain == "" && len(domainPool) > 0 {
-		fallbackCFProxyDomain = domainPool[0]
-	}
-
 	normalizedFakeTLSDomain := normalizeCFProxyDomain(*fakeTLSDomain)
 	if normalizedFakeTLSDomain != "" && !isLikelyDomain(normalizedFakeTLSDomain) {
 		return nil, fmt.Errorf("invalid --fake-tls-domain: %s", *fakeTLSDomain)
 	}
 
-	return &Config{
+	cfg := &Config{
 		Host:        *host,
 		Port:        *port,
 		SecretHex:   *secret,
@@ -163,12 +157,13 @@ func parseFlags() (*Config, error) {
 		DCPool:      dcPool,
 		FallbackCFProxy:         !*noCfproxy,
 		FallbackCFProxyPriority: *cfproxyPriority,
-		FallbackCFProxyDomain:   fallbackCFProxyDomain,
+		FallbackCFProxyDomain:   "",
 		FallbackCFProxyUserDomain: (userDomainProvided && userDomain != "") || userPoolProvided,
 		FallbackCFProxyRefresh:    !*noCfproxyDomainRefresh,
 		FallbackCFProxyDomainsURL: strings.TrimSpace(*cfproxyDomainsURL),
-		FallbackCFProxyDomains:    domainPool,
-		FallbackCFProxyActive:     activeDomain,
+		FallbackCFProxyDomains:    nil,
+		FallbackCFProxyActive:     "",
+		FallbackCFProxyPerDCActive: make(map[int]string),
 		Verbose:     *verbose,
 		BufKB:       maxInt(*bufKB, 4),
 		PoolSize:    maxInt(*poolSize, 0),
@@ -177,7 +172,10 @@ func parseFlags() (*Config, error) {
 		LogMaxMB:    *logMaxMB,
 		LogBackups:  maxInt(*logBackups, 0),
 		PprofListen: strings.TrimSpace(*pprofListen),
-	}, nil
+	}
+
+	cfg.setCFProxyDomains(domainPool)
+	return cfg, nil
 }
 
 type multiFlag []string

@@ -84,6 +84,7 @@ prepare_files: build
 	$(if $(filter openwrt,$(PLATFORM)), $(call _copy_files,./files/openwrt))
 
 	if [ -d "$(CONTROL_DIR)" ]; then find "$(CONTROL_DIR)" -type f -exec dos2unix {} +; fi
+	if [ -d "$(ETC_DIR)" ]; then find "$(ETC_DIR)" -type f -exec dos2unix {} +; fi
 	if [ -d "$(ETC_DIR)/init.d" ]; then find "$(ETC_DIR)/init.d" -type f -exec dos2unix {} +; fi
 
 	echo "Package: $(PKG_NAME)" > "$(CONTROL_DIR)/control"

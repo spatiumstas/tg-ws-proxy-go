@@ -284,7 +284,7 @@ func cfproxyFallback(label string, cfg *Config, dc int, isMedia bool, client net
 		mediaTag = " media"
 	}
 
-	for _, baseDomain := range cfg.cfproxyDomainsForTry() {
+	for _, baseDomain := range cfg.cfproxyDomainsForTry(dc) {
 		domain := fmt.Sprintf("kws%d.%s", dc, baseDomain)
 		logf("INFO   [%s] DC%d%s -> CF proxy wss://%s/apiws", label, dc, mediaTag, domain)
 		ws, resp, err := dialWSByDomain(domain, 10*time.Second)
@@ -305,7 +305,7 @@ func cfproxyFallback(label string, cfg *Config, dc int, isMedia bool, client net
 		}
 
 		atomic.AddInt64(&stats.connectionsCF, 1)
-		cfg.promoteCFProxyDomain(baseDomain)
+		cfg.promoteCFProxyDomain(dc, baseDomain)
 		bridgeWS(label, dc, isMedia, client, ws, cltDec, cltEnc, tgEnc, tgDec, splitter)
 		return nil
 	}

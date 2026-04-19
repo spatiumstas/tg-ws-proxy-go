@@ -29,21 +29,30 @@ apk add %link%
 Main config file:
 
 ```shell
-# Entware (KeeneticOS): /opt/etc/tg-ws-proxy.conf
-# OpenWrt/generic opkg: /etc/tg-ws-proxy.conf
+# Entware (KeeneticOS):
+#   /opt/etc/tg-ws-proxy/config.conf
+#   /opt/etc/tg-ws-proxy/secret.conf
+# OpenWrt/generic opkg:
+#   /etc/tg-ws-proxy/config.conf
+#   /etc/tg-ws-proxy/secret.conf
 ```
 
 Minimal config example:
 
 ```conf
+# config.conf
 HOST=0.0.0.0
 PORT=1443
-SECRET=
 LOG_LEVEL=0
 DC_IP_DEFAULT=149.154.167.220
 DC_IP_DEFAULT_POOL=""
 FAKE_TLS_DOMAIN=""
+CFPROXY_FALLBACK_DOMAINS="pclead.co.uk,offshor.co.uk,cakeisalie.co.uk,noskomnadzor.co.uk,lovetrue.co.uk"
+CFPROXY_DOMAINS_URL="https://raw.githubusercontent.com/Flowseal/tg-ws-proxy/main/.github/cfproxy-domains.txt"
 EXTRA_ARGS=""
+
+# secret.conf
+SECRET=
 ```
 
 > Notes:
@@ -53,7 +62,8 @@ EXTRA_ARGS=""
 3. `EXTRA_ARGS` is for per-DC overrides and extra runtime flags, [CFProxy](https://github.com/Flowseal/tg-ws-proxy/blob/main/docs/CfProxy.md)
 4. Full list of available commands `--help`
 5. `FAKE_TLS_DOMAIN` enables Fake TLS mode (`ee` secret link). Keep empty for standard `dd` mode.
-6. `CFPROXY_DOMAINS_URL` [default value](https://raw.githubusercontent.com/Flowseal/tg-ws-proxy/main/.github/cfproxy-domains.txt)
+6. `CFPROXY_FALLBACK_DOMAINS` - local fallback domain list.
+7. `CFPROXY_DOMAINS_URL` [default value](https://raw.githubusercontent.com/Flowseal/tg-ws-proxy/main/.github/cfproxy-domains.txt)
 
 Override examples:
 

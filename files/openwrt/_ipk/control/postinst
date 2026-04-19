@@ -4,23 +4,28 @@ set -e
 chmod +x /usr/bin/tg-ws-proxy || true
 chmod +x /etc/init.d/tg-ws-proxy || true
 
-CONFFILE=/etc/tg-ws-proxy.conf
+CONFIG_DIR=/etc/tg-ws-proxy
+CONFIG_FILE=$CONFIG_DIR/config.conf
+SECRET_FILE=$CONFIG_DIR/secret.conf
 INIT_SCRIPT=/etc/init.d/tg-ws-proxy
 
-if [ -f "$CONFFILE" ]; then
-	. "$CONFFILE" || true
-	if [ -z "${SECRET:-}" ]; then
-		secret="$(/usr/bin/tg-ws-proxy --gen-secret 2>/dev/null | tr -d ' \r\n' || true)"
-		if [ "${#secret}" -eq 32 ]; then
-			if grep -Eq '^[[:space:]]*SECRET=' "$CONFFILE"; then
-				sed -i "s|^[[:space:]]*SECRET=.*$|SECRET=$secret|" "$CONFFILE"
-			else
-				printf '\nSECRET=%s\n' "$secret" >> "$CONFFILE"
-			fi
-			echo "Generated SECRET in $CONFFILE"
+mkdir -p "$CONFIG_DIR"
+
+[ -f "$CONFIG_FILE" ] || : > "$CONFIG_FILE"
+[ -f "$SECRET_FILE" ] || printf 'SECRET=\n' > "$SECRET_FILE"
+
+. "$SECRET_FILE" || true
+if [ -z "${SECRET:-}" ]; then
+	secret="$(/usr/bin/tg-ws-proxy --gen-secret 2>/dev/null | tr -d ' \r\n' || true)"
+	if [ "${#secret}" -eq 32 ]; then
+		if grep -Eq '^[[:space:]]*SECRET=' "$SECRET_FILE"; then
+			sed -i "s|^[[:space:]]*SECRET=.*$|SECRET=$secret|" "$SECRET_FILE"
 		else
-			echo "WARNING: failed to generate SECRET automatically" >&2
+			printf 'SECRET=%s\n' "$secret" >> "$SECRET_FILE"
 		fi
+		echo "Generated SECRET in $SECRET_FILE"
+	else
+		echo "WARNING: failed to generate SECRET automatically" >&2
 	fi
 fi
 
