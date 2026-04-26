@@ -33,7 +33,7 @@ load_config() {
 
   . "$CONFIG_FILE"
   . "$SECRET_FILE"
-  [ -n "${CFPROXY_FALLBACK_DOMAINS+x}" ] || CFPROXY_FALLBACK_DOMAINS=""
+  [ -n "${CFPROXY_DOMAINS+x}" ] || CFPROXY_DOMAINS=""
   [ -n "${CFPROXY_DOMAINS_URL+x}" ] || CFPROXY_DOMAINS_URL=""
   [ -n "${FAKE_TLS_DOMAIN+x}" ] || FAKE_TLS_DOMAIN=""
   return 0
@@ -77,8 +77,8 @@ start() {
   fi
 
   cf_args=""
-  if [ -n "$CFPROXY_FALLBACK_DOMAINS" ]; then
-    cf_args="$cf_args --cfproxy-domains $CFPROXY_FALLBACK_DOMAINS"
+  if [ -n "$CFPROXY_DOMAINS" ]; then
+    cf_args="$cf_args --cfproxy-domains $CFPROXY_DOMAINS"
   fi
   if [ -n "$CFPROXY_DOMAINS_URL" ]; then
     cf_args="$cf_args --cfproxy-domains-url $CFPROXY_DOMAINS_URL"

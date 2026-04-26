@@ -38,7 +38,6 @@ func dialWS(targetIP, domain string, timeout time.Duration) (*websocket.Conn, *h
 	headers := http.Header{}
 	headers.Set("Host", domain)
 	headers.Set("Origin", "https://web.telegram.org")
-	headers.Set("User-Agent", "Mozilla/5.0")
 	return dialer.Dial(u.String(), headers)
 }
 
@@ -274,7 +273,6 @@ func dialWSByDomain(domain string, timeout time.Duration) (*websocket.Conn, *htt
 	headers := http.Header{}
 	headers.Set("Host", domain)
 	headers.Set("Origin", "https://web.telegram.org")
-	headers.Set("User-Agent", "Mozilla/5.0")
 	return dialer.Dial(u.String(), headers)
 }
 

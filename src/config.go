@@ -117,6 +117,7 @@ func parseFlags() (*Config, error) {
 	userDomainProvided := flagProvided("cfproxy-domain")
 	userPoolProvided := strings.TrimSpace(*cfproxyDomains) != ""
 	userDomain := normalizeCFProxyDomain(*cfproxyDomain)
+	userFixedDomain := userDomainProvided && userDomain != ""
 
 	domainPool := defaultCFProxyDomains()
 	if userPoolProvided {
@@ -158,7 +159,7 @@ func parseFlags() (*Config, error) {
 		FallbackCFProxy:         !*noCfproxy,
 		FallbackCFProxyPriority: *cfproxyPriority,
 		FallbackCFProxyDomain:   "",
-		FallbackCFProxyUserDomain: (userDomainProvided && userDomain != "") || userPoolProvided,
+		FallbackCFProxyUserDomain: userFixedDomain || userPoolProvided,
 		FallbackCFProxyRefresh:    !*noCfproxyDomainRefresh,
 		FallbackCFProxyDomainsURL: strings.TrimSpace(*cfproxyDomainsURL),
 		FallbackCFProxyDomains:    nil,
