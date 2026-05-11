@@ -107,6 +107,43 @@ func isLikelyDomain(domain string) bool {
 	return true
 }
 
+func isValidCFProxyDomain(domain string) bool {
+	d := normalizeCFProxyDomain(domain)
+	if d == "" || len(d) > 253 || strings.HasPrefix(d, ".") || strings.HasSuffix(d, ".") {
+		return false
+	}
+
+	labels := strings.Split(d, ".")
+	if len(labels) < 2 {
+		return false
+	}
+
+	for _, label := range labels {
+		if label == "" || len(label) > 63 || strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
+			return false
+		}
+		for _, ch := range label {
+			if (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-' {
+				continue
+			}
+			return false
+		}
+	}
+
+	tld := labels[len(labels)-1]
+	if len(tld) < 2 {
+		return false
+	}
+	hasLetter := false
+	for _, ch := range tld {
+		if ch >= 'a' && ch <= 'z' {
+			hasLetter = true
+			break
+		}
+	}
+	return hasLetter
+}
+
 func decodeCFProxyDomain(raw string) string {
 	s := normalizeCFProxyDomain(raw)
 	if !strings.HasSuffix(s, ".com") {
@@ -168,20 +205,22 @@ func fetchCFProxyDomains(url string, timeout time.Duration) ([]string, error) {
 	}
 
 	lines := strings.Split(string(body), "\n")
+	accepted := 0
 	pool := make([]string, 0, len(lines))
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
+		accepted++
 		domain := decodeCFProxyDomain(line)
-		if !isLikelyDomain(domain) {
+		if !isValidCFProxyDomain(domain) {
 			continue
 		}
 		pool = appendUniqueDomains(pool, domain)
 	}
-	if len(pool) == 0 {
-		return nil, fmt.Errorf("empty domain list from %s", trimmedURL)
+	if len(pool) < defaultCFProxyRefreshMinValidDomains {
+		return nil, fmt.Errorf("low-quality domain list from %s (total=%d valid=%d required>=%d)", trimmedURL, accepted, len(pool), defaultCFProxyRefreshMinValidDomains)
 	}
 	return pool, nil
 }

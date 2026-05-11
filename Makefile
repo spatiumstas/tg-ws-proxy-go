@@ -72,7 +72,11 @@ build:
 	mkdir -p "$(COMPILE_DIR)"
 	cd "$(GO_PROXY_DIR)" && \
 		GOOS="$(GOOS)" GOARCH="$(GOARCH)" GOARM="$(GOARM)" GOMIPS="$(GOMIPS)" CGO_ENABLED="$(CGO_ENABLED)" \
-		go build -trimpath -o "$(abspath $(COMPILE_DIR))/tg-ws-proxy" .
+		go build -trimpath -ldflags="-w -s" -o "$(abspath $(COMPILE_DIR))/tg-ws-proxy" .
+
+ifneq ($(filter $(GOARCH),riscv64 mips64 mips64le loong64),$(GOARCH))
+	upx -9 --lzma "$(COMPILE_DIR)/tg-ws-proxy"
+endif
 
 prepare_files: build
 	rm -rf "$(ROOT_DIR)" "$(CONTROL_DIR)"
@@ -102,9 +106,11 @@ prepare_files: build
 	if [ -f "$(CONTROL_DIR)/postinst" ]; then chmod +x "$(CONTROL_DIR)/postinst"; fi
 	if [ -f "$(CONTROL_DIR)/postrm" ]; then chmod +x "$(CONTROL_DIR)/postrm"; fi
 
-package:
-	$(MAKE) package_ipk
-	@if [ "$(PLATFORM)" = "openwrt" ]; then $(MAKE) package_apk; fi
+package: package_ipk
+
+ifeq ($(PLATFORM),openwrt)
+package: package_apk
+endif
 
 package_ipk: prepare_files
 	mkdir -p "$(BUILDS_DIR)"

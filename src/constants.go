@@ -27,6 +27,7 @@ const (
 	defaultCFProxyDomain = "pclead.co.uk"
 	defaultCFProxyRefreshTimeout = 10 * time.Second
 	defaultCFProxyRefreshInterval = 1 * time.Hour
+	defaultCFProxyRefreshMinValidDomains = 3
 )
 
 var (

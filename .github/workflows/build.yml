@@ -60,10 +60,15 @@ jobs:
           cache: true
           cache-dependency-path: src/go.sum
 
-      - name: Install dos2unix
+      - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y dos2unix
+
+          wget https://github.com/upx/upx/releases/download/v5.1.1/upx-5.1.1-amd64_linux.tar.xz
+          tar -xf upx-5.1.1-amd64_linux.tar.xz
+          sudo mv upx-5.1.1-amd64_linux/upx /usr/local/bin/upx
+          sudo chmod +x /usr/local/bin/upx
 
       - name: Install apk-tools
         if: ${{ startsWith(matrix.config, 'config/openwrt/') }}
