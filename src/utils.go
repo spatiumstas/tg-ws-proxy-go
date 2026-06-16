@@ -4,7 +4,15 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"time"
 )
+
+var tcpKeepAliveConfig = net.KeepAliveConfig{
+	Enable:   true,
+	Idle:     10 * time.Second,
+	Interval: 5 * time.Second,
+	Count:    3,
+}
 
 func formatFloat(v float64) string {
 	return fmt.Sprintf("%.1f", v)
@@ -49,5 +57,6 @@ func setSockOpts(c net.Conn, bufSize int) error {
 	_ = tcp.SetNoDelay(true)
 	_ = tcp.SetReadBuffer(bufSize)
 	_ = tcp.SetWriteBuffer(bufSize)
+	_ = tcp.SetKeepAliveConfig(tcpKeepAliveConfig)
 	return nil
 }

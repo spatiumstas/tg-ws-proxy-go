@@ -1,22 +1,22 @@
 #!/bin/sh
-set -e
+[ "${IPKG_NO_SCRIPT}" = "1" ] && exit 0
+[ -s ${IPKG_INSTROOT}/lib/functions.sh ] || exit 0
+. ${IPKG_INSTROOT}/lib/functions.sh
+export root="${IPKG_INSTROOT}"
+export pkgname="tg-ws-proxy"
+add_group_and_user
 
-chmod +x /opt/bin/tg-ws-proxy || true
-chmod +x /opt/etc/init.d/S99tg-ws-proxy || true
-
-CONFIG_DIR=/opt/etc/tg-ws-proxy
-CONFIG_FILE=$CONFIG_DIR/config.conf
-SECRET_FILE=$CONFIG_DIR/secret.conf
-INIT_SCRIPT=/opt/etc/init.d/S99tg-ws-proxy
+CONFIG_DIR="${IPKG_INSTROOT}/etc/tg-ws-proxy"
+CONFIG_FILE="$CONFIG_DIR/config.conf"
+SECRET_FILE="$CONFIG_DIR/secret.conf"
 
 mkdir -p "$CONFIG_DIR"
-
 [ -f "$CONFIG_FILE" ] || : > "$CONFIG_FILE"
 [ -f "$SECRET_FILE" ] || printf 'SECRET=\n' > "$SECRET_FILE"
 
 . "$SECRET_FILE" || true
 if [ -z "${SECRET:-}" ]; then
-	secret="$(/opt/bin/tg-ws-proxy --gen-secret 2>/dev/null | tr -d ' \r\n' || true)"
+	secret="$(${IPKG_INSTROOT}/usr/bin/tg-ws-proxy --gen-secret 2>/dev/null | tr -d ' \r\n' || true)"
 	if [ "${#secret}" -eq 32 ]; then
 		if grep -Eq '^[[:space:]]*SECRET=' "$SECRET_FILE"; then
 			sed -i "s|^[[:space:]]*SECRET=.*$|SECRET=$secret|" "$SECRET_FILE"
@@ -29,4 +29,4 @@ if [ -z "${SECRET:-}" ]; then
 	fi
 fi
 
-"$INIT_SCRIPT" restart || true
+default_postinst

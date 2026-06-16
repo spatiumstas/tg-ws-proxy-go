@@ -1,5 +1,6 @@
 #!/bin/sh
 
-service tg-ws-proxy stop
+/etc/init.d/tg-ws-proxy stop 2>/dev/null || true
+/etc/init.d/tg-ws-proxy disable 2>/dev/null || true
 
 exit 0

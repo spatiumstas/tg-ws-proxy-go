@@ -29,4 +29,5 @@ if [ -z "${SECRET:-}" ]; then
 	fi
 fi
 
+"$INIT_SCRIPT" enable || true
 "$INIT_SCRIPT" restart || true

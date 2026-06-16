@@ -1,5 +1,5 @@
 #!/bin/sh
 
-/opt/etc/init.d/S61tg-ws-proxy stop
+/opt/etc/init.d/S99tg-ws-proxy stop
 
 exit 0

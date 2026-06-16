@@ -17,6 +17,7 @@ GOOS ?=
 GOARCH ?=
 GOARM ?=
 GOMIPS ?=
+GO386 ?=
 CGO_ENABLED ?= 0
 GO_PROXY_DIR ?= src
 
@@ -71,7 +72,7 @@ clean:
 build:
 	mkdir -p "$(COMPILE_DIR)"
 	cd "$(GO_PROXY_DIR)" && \
-		GOOS="$(GOOS)" GOARCH="$(GOARCH)" GOARM="$(GOARM)" GOMIPS="$(GOMIPS)" CGO_ENABLED="$(CGO_ENABLED)" \
+		GOOS="$(GOOS)" GOARCH="$(GOARCH)" GOARM="$(GOARM)" GOMIPS="$(GOMIPS)" GO386="$(GO386)" CGO_ENABLED="$(CGO_ENABLED)" \
 		go build -trimpath -ldflags="-w -s" -o "$(abspath $(COMPILE_DIR))/tg-ws-proxy" .
 
 ifneq ($(filter $(GOARCH),riscv64 mips64 mips64le loong64),$(GOARCH))

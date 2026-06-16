@@ -5,6 +5,7 @@ import (
 	"crypto/cipher"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -31,7 +32,7 @@ func dialWS(targetIP, domain string, timeout time.Duration) (*websocket.Conn, *h
 			InsecureSkipVerify: true,
 		},
 		NetDialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			d := &net.Dialer{Timeout: timeout}
+			d := &net.Dialer{Timeout: timeout, KeepAliveConfig: tcpKeepAliveConfig}
 			return d.DialContext(ctx, "tcp", net.JoinHostPort(targetIP, "443"))
 		},
 	}
@@ -109,6 +110,8 @@ func bridgeWS(label string, dc int, isMedia bool, client net.Conn, ws *websocket
 
 	go func() {
 		defer func() { done <- struct{}{} }()
+		buf := ioBufPool.Get().([]byte)
+		defer ioBufPool.Put(buf)
 		var downPending int64
 		defer func() {
 			if downPending > 0 {
@@ -117,27 +120,38 @@ func bridgeWS(label string, dc int, isMedia bool, client net.Conn, ws *websocket
 		}()
 		for {
 			_ = ws.SetReadDeadline(time.Now().Add(ioIdleTimeout))
-			mt, data, err := ws.ReadMessage()
+			mt, r, err := ws.NextReader()
 			if err != nil {
 				return
 			}
 			if mt != websocket.BinaryMessage {
 				continue
 			}
-			n := int64(len(data))
-			downPending += n
-			downBytes += n
 			downPkts++
-			if downPending >= statsFlushBytes {
-				atomic.AddInt64(&stats.bytesDown, downPending)
-				downPending = 0
-			}
-
-			tgDec.XORKeyStream(data, data)
-			cltEnc.XORKeyStream(data, data)
-			_ = client.SetWriteDeadline(time.Now().Add(ioIdleTimeout))
-			if _, werr := client.Write(data); werr != nil {
-				return
+			for {
+				nr, rerr := r.Read(buf)
+				if nr > 0 {
+					n := int64(nr)
+					downPending += n
+					downBytes += n
+					if downPending >= statsFlushBytes {
+						atomic.AddInt64(&stats.bytesDown, downPending)
+						downPending = 0
+					}
+					chunk := buf[:nr]
+					tgDec.XORKeyStream(chunk, chunk)
+					cltEnc.XORKeyStream(chunk, chunk)
+					_ = client.SetWriteDeadline(time.Now().Add(ioIdleTimeout))
+					if _, werr := client.Write(chunk); werr != nil {
+						return
+					}
+				}
+				if rerr != nil {
+					if rerr == io.EOF {
+						break
+					}
+					return
+				}
 			}
 		}
 	}()

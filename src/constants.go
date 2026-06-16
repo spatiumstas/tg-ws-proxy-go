@@ -15,18 +15,18 @@ const (
 	protoIntermediateInt       = 0xEEEEEEEE
 	protoPaddedIntermediateInt = 0xDDDDDDDD
 
-	wsPoolMaxAge   = 120 * time.Second
-	dcFailCooldown = 30 * time.Second
-	ioIdleTimeout  = 90 * time.Second
-	wsWriteTimeout = 15 * time.Second
-	statsFlushBytes = 256 * 1024
-	acceptPollTimeout = 1 * time.Second
-	acceptBackoffMin  = 5 * time.Millisecond
-	acceptBackoffMax  = 1 * time.Second
-	defaultMaxConns   = 1024
-	defaultCFProxyDomain = "pclead.co.uk"
-	defaultCFProxyRefreshTimeout = 10 * time.Second
-	defaultCFProxyRefreshInterval = 1 * time.Hour
+	wsPoolMaxAge                         = 120 * time.Second
+	dcFailCooldown                       = 30 * time.Second
+	ioIdleTimeout                        = 90 * time.Second
+	wsWriteTimeout                       = 15 * time.Second
+	statsFlushBytes                      = 256 * 1024
+	acceptPollTimeout                    = 1 * time.Second
+	acceptBackoffMin                     = 5 * time.Millisecond
+	acceptBackoffMax                     = 1 * time.Second
+	defaultMaxConns                      = 1024
+	defaultCFProxyDomain                 = "pclead.co.uk"
+	defaultCFProxyRefreshTimeout         = 10 * time.Second
+	defaultCFProxyRefreshInterval        = 1 * time.Hour
 	defaultCFProxyRefreshMinValidDomains = 3
 )
 
