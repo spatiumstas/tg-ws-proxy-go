@@ -168,6 +168,55 @@ func TestPoolRefillDialsSequentially(t *testing.T) {
 	}
 }
 
+func TestPoolRefillUsesFrontingDuringIPCooldown(t *testing.T) {
+	origConnect := poolWSConnect
+	origFrontingConnect := poolWSConnectFronting
+	defer func() {
+		poolWSConnect = origConnect
+		poolWSConnectFronting = origFrontingConnect
+		clearFrontingActive()
+	}()
+
+	const targetIP = "1.2.3.4"
+	ipFuMu.Lock()
+	oldCooldown, hadCooldown := ipFailUntil[targetIP]
+	ipFailUntil[targetIP] = time.Now().Add(time.Hour)
+	ipFuMu.Unlock()
+	defer func() {
+		ipFuMu.Lock()
+		if hadCooldown {
+			ipFailUntil[targetIP] = oldCooldown
+		} else {
+			delete(ipFailUntil, targetIP)
+		}
+		ipFuMu.Unlock()
+	}()
+
+	conn, cleanup := dialTestWS(t)
+	defer cleanup()
+	var frontingCalls int64
+	poolWSConnect = func(string, []string, time.Duration) (*websocket.Conn, *http.Response, error) {
+		t.Fatal("regular WS dial must not run during IP cooldown")
+		return nil, nil, nil
+	}
+	poolWSConnectFronting = func(string, []string, time.Duration) (*websocket.Conn, *http.Response, error) {
+		atomic.AddInt64(&frontingCalls, 1)
+		return conn, nil, nil
+	}
+
+	setFrontingActive()
+	p := newWSPool()
+	key := wsPoolKey{DC: 1, TargetIP: targetIP}
+	p.refill(&Config{PoolSize: 1}, key, []string{"d"})
+
+	if got := atomic.LoadInt64(&frontingCalls); got != 1 {
+		t.Fatalf("fronting dials = %d, want 1", got)
+	}
+	if got := len(p.idle[key]); got != 1 {
+		t.Fatalf("pool size = %d, want 1", got)
+	}
+}
+
 func TestPoolSeparatesTargets(t *testing.T) {
 	conn, cleanup := dialTestWS(t)
 	defer cleanup()

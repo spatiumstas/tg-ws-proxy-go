@@ -85,11 +85,12 @@ func (p *wsPool) refill(cfg *Config, key wsPoolKey, domains []string) {
 		if cur >= cfg.PoolSize {
 			return
 		}
-		if inIPCooldown(key.TargetIP) {
+		useFronting := frontingActive()
+		if inIPCooldown(key.TargetIP) && !useFronting {
 			return
 		}
 		connect := poolWSConnect
-		if frontingActive() {
+		if useFronting {
 			connect = poolWSConnectFronting
 		}
 		conn, _, err := connect(key.TargetIP, domains, poolConnectTimeout)
@@ -97,7 +98,7 @@ func (p *wsPool) refill(cfg *Config, key wsPoolKey, domains []string) {
 			return
 		}
 		p.mu.Lock()
-		if inIPCooldown(key.TargetIP) {
+		if inIPCooldown(key.TargetIP) && !useFronting {
 			p.mu.Unlock()
 			_ = conn.Close()
 			return

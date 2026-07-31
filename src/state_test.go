@@ -108,3 +108,18 @@ func TestFrontingActive(t *testing.T) {
 		t.Fatal("fronting should be inactive after second clear")
 	}
 }
+
+func TestSplitWSTargetsKeepsCooldownIPForFronting(t *testing.T) {
+	const cooldownIP = "149.154.167.220"
+	clearIPCooldown(cooldownIP)
+	defer clearIPCooldown(cooldownIP)
+	setIPCooldown(cooldownIP)
+
+	directTargets, frontingTargets := splitWSTargets([]string{cooldownIP}, true)
+	if len(directTargets) != 0 {
+		t.Fatalf("direct targets = %v, want none during cooldown", directTargets)
+	}
+	if len(frontingTargets) != 1 || frontingTargets[0] != cooldownIP {
+		t.Fatalf("fronting targets = %v, want [%s]", frontingTargets, cooldownIP)
+	}
+}

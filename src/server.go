@@ -177,6 +177,20 @@ func handleClient(client net.Conn, cfg *Config, secret []byte) {
 	handleMTProtoClient(handshakeConn, cfg, hi, secret, label)
 }
 
+func splitWSTargets(targets []string, skipCooldown bool) (directTargets, frontingTargets []string) {
+	frontingTargets = targets
+	if !skipCooldown {
+		return targets, frontingTargets
+	}
+	directTargets = make([]string, 0, len(targets))
+	for _, target := range targets {
+		if !inIPCooldown(target) {
+			directTargets = append(directTargets, target)
+		}
+	}
+	return directTargets, frontingTargets
+}
+
 func handleMTProtoClient(client net.Conn, cfg *Config, hi *handshakeInfo, secret []byte, label string) {
 	protoInt := protoFromTag(hi.ProtoTag)
 	mediaTag := ""
@@ -217,8 +231,7 @@ func handleMTProtoClient(client net.Conn, cfg *Config, hi *handshakeInfo, secret
 
 		useWorker := cfg.hasCFProxyWorkerDomains()
 		tryWorker := func() bool {
-			splitter := newFallbackSplitter()
-			if err := cfWorkerFallback(label, cfg, hi.DC, hi.IsMedia, fallback, client, relayInit, cltDec, cltEnc, tgEnc, tgDec, splitter); err == nil {
+			if err := cfWorkerFallback(label, cfg, hi.DC, hi.IsMedia, fallback, client, relayInit, cltDec, cltEnc, tgEnc, tgDec, nil); err == nil {
 				log.Printf("INFO   [%s] DC%d%s CF worker fallback closed", label, hi.DC, mediaTag)
 				return true
 			}
@@ -279,22 +292,12 @@ func handleMTProtoClient(client net.Conn, cfg *Config, hi *handshakeInfo, secret
 		return
 	}
 	primaryTarget := targets[0]
-	directTargets := targets
 	hasAnyCFFallback := cfg.hasCFProxyWorkerDomains() || (cfg.FallbackCFProxy && cfg.hasCFProxyDomains())
-	if hasAnyCFFallback {
-		directTargets = make([]string, 0, len(targets))
-		for _, target := range targets {
-			if !inIPCooldown(target) {
-				directTargets = append(directTargets, target)
-			}
-		}
-		if len(directTargets) == 0 {
-			log.Printf("INFO   [%s] DC%d%s WS target IPs are timed out -> fallback", label, hi.DC, mediaTag)
-			doFallback(false, false, false, primaryTarget)
-			return
-		}
+	directTargets, frontingTargets := splitWSTargets(targets, hasAnyCFFallback)
+	wsTarget := primaryTarget
+	if len(directTargets) > 0 {
+		wsTarget = directTargets[0]
 	}
-	wsTarget := directTargets[0]
 
 	dcW := hi.DC
 	if v, ok := dcOverrides[dcW]; ok {
@@ -337,7 +340,7 @@ func handleMTProtoClient(client net.Conn, cfg *Config, hi *handshakeInfo, secret
 	}
 
 	connectFronting := func(reason string) (*websocket.Conn, string) {
-		for _, target := range directTargets {
+		for _, target := range frontingTargets {
 			log.Printf("INFO   [%s] DC%d%s -> fronting %s via %s", label, hi.DC, mediaTag, reason, target)
 			conn, _, err := wsConnectFronting(target, domains, wsConnectTimeout)
 			if err == nil {
@@ -358,6 +361,11 @@ func handleMTProtoClient(client net.Conn, cfg *Config, hi *handshakeInfo, secret
 				return conn, target, false
 			}
 			clearFrontingActive()
+		}
+		if len(directTargets) == 0 {
+			log.Printf("INFO   [%s] DC%d%s WS target IPs are timed out -> fallback", label, hi.DC, mediaTag)
+			doFallback(false, false, false, primaryTarget)
+			return nil, "", false
 		}
 		timeout := wsConnectTimeout
 		if inCooldown(key) {
