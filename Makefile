@@ -8,7 +8,24 @@ PKG_LICENSE := MIT
 PKG_SECTION := net
 PKG_MAINTAINER := tg-ws-proxy maintainers
 
-PKG_VERSION := $(shell cat VERSION)
+ifeq ($(strip $(PKG_VERSION)),)
+	TAG := $(shell git describe --tags --abbrev=0 2> /dev/null)
+	COMMITS_SINCE_TAG := $(shell [ -n "$(TAG)" ] && git rev-list $(TAG)..HEAD --count 2> /dev/null || echo 0)
+
+	ifneq ($(strip $(TAG)),)
+		ifeq ($(strip $(COMMITS_SINCE_TAG)),0)
+			PKG_VERSION := $(shell echo "$(TAG)" | sed 's/-rev[0-9]*$$//')
+			TAG_REVISION := $(shell echo "$(TAG)" | grep -oE 'rev[0-9]+$$' | sed 's/rev//')
+			ifneq ($(strip $(TAG_REVISION)),)
+				PKG_REVISION ?= $(TAG_REVISION)
+			endif
+		endif
+	endif
+
+	ifeq ($(strip $(PKG_VERSION)),)
+		PKG_VERSION := $(shell cat VERSION)
+	endif
+endif
 PKG_REVISION ?= 1
 
 PLATFORM ?=
@@ -40,6 +57,12 @@ APK_DIR := $(BUILD_DIR)/apk
 APK_ARCH ?= $(TARGET)
 
 BUILD_KEY_APK_SEC ?=
+
+ifeq ($(shell id -u),0)
+	ROOT_WRAP :=
+else
+	ROOT_WRAP := fakeroot --
+endif
 
 ifeq ($(PLATFORM),entware)
 BIN_DIR := $(ROOT_DIR)/opt/bin
@@ -151,7 +174,7 @@ package_apk: prepare_files
 	if [ -f "$(APK_DIR)/post-upgrade.sh" ]; then \
 		APK_SCRIPT_ARGS="$$APK_SCRIPT_ARGS -s post-upgrade:$(APK_DIR)/post-upgrade.sh"; \
 	fi; \
-	apk mkpkg \
+	$(ROOT_WRAP) apk mkpkg \
 		-I "name:$(PKG_NAME)" \
 		-I "version:$(PKG_VERSION)-r$(PKG_REVISION)" \
 		-I "description:$(PKG_DESCRIPTION)" \

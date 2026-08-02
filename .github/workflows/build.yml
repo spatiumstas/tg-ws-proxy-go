@@ -60,7 +60,7 @@ jobs:
   build:
     name: Build packages (${{ matrix.name }})
     needs: [ prepare, test ]
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
@@ -80,17 +80,17 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y dos2unix
+          sudo apt-get install -y dos2unix fakeroot upx meson ninja-build pkg-config libssl-dev zlib1g-dev libzstd-dev
 
-          wget https://github.com/upx/upx/releases/download/v5.1.1/upx-5.1.1-amd64_linux.tar.xz
-          tar -xf upx-5.1.1-amd64_linux.tar.xz
-          sudo mv upx-5.1.1-amd64_linux/upx /usr/local/bin/upx
-          sudo chmod +x /usr/local/bin/upx
-
-      - name: Install apk-tools
+      - name: Build apk-tools
         if: ${{ startsWith(matrix.config, 'config/openwrt/') }}
         run: |
-          docker run --rm -v /usr/local/bin:/mnt alpine:edge sh -c "apk add --no-cache apk-tools-static && cp /sbin/apk.static /mnt/apk && chmod +x /mnt/apk"          
+          git clone --depth 1 --branch v3.0.7 https://github.com/alpinelinux/apk-tools.git /tmp/apk-tools
+          cd /tmp/apk-tools
+          meson setup build -Dpython=disabled -Dtests=disabled -Ddocs=disabled
+          ninja -C build
+          sudo ninja -C build install
+          sudo ldconfig
 
       - name: Build and package
         env:
