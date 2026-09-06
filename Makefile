@@ -9,22 +9,9 @@ PKG_SECTION := net
 PKG_MAINTAINER := tg-ws-proxy maintainers
 
 ifeq ($(strip $(PKG_VERSION)),)
-	TAG := $(shell git describe --tags --abbrev=0 2> /dev/null)
-	COMMITS_SINCE_TAG := $(shell [ -n "$(TAG)" ] && git rev-list $(TAG)..HEAD --count 2> /dev/null || echo 0)
-
-	ifneq ($(strip $(TAG)),)
-		ifeq ($(strip $(COMMITS_SINCE_TAG)),0)
-			PKG_VERSION := $(shell echo "$(TAG)" | sed 's/-rev[0-9]*$$//')
-			TAG_REVISION := $(shell echo "$(TAG)" | grep -oE 'rev[0-9]+$$' | sed 's/rev//')
-			ifneq ($(strip $(TAG_REVISION)),)
-				PKG_REVISION ?= $(TAG_REVISION)
-			endif
-		endif
-	endif
-
-	ifeq ($(strip $(PKG_VERSION)),)
-		PKG_VERSION := $(shell cat VERSION)
-	endif
+ifneq ($(filter all prepare_files package package_ipk package_apk,$(or $(MAKECMDGOALS),all)),)
+$(error PKG_VERSION is required; use make package PKG_VERSION=1.2.3)
+endif
 endif
 PKG_REVISION ?= 1
 
@@ -68,10 +55,12 @@ ifeq ($(PLATFORM),entware)
 BIN_DIR := $(ROOT_DIR)/opt/bin
 ETC_DIR := $(ROOT_DIR)/opt/etc
 VAR_DIR := $(ROOT_DIR)/opt/var
+LIB_DIR := $(ROOT_DIR)/opt/lib
 else
 BIN_DIR := $(ROOT_DIR)/usr/bin
 ETC_DIR := $(ROOT_DIR)/etc
 VAR_DIR := $(ROOT_DIR)/var
+LIB_DIR := $(ROOT_DIR)/lib
 endif
 
 define _copy_files
@@ -80,6 +69,7 @@ define _copy_files
 	if [ -d $(1)/bin ]; then mkdir -p "$(BIN_DIR)"; cp -r $(1)/bin/* "$(BIN_DIR)"; fi
 	if [ -d $(1)/etc ]; then mkdir -p "$(ETC_DIR)"; cp -r $(1)/etc/* "$(ETC_DIR)"; fi
 	if [ -d $(1)/var ]; then mkdir -p "$(VAR_DIR)"; cp -r $(1)/var/* "$(VAR_DIR)"; fi
+	if [ -d $(1)/lib ]; then mkdir -p "$(LIB_DIR)"; cp -r $(1)/lib/* "$(LIB_DIR)"; fi
 endef
 
 PACKAGE_FILE := $(BUILDS_DIR)/$(PKG_NAME)_$(PKG_VERSION)-$(PKG_REVISION)_$(PLATFORM)_$(TARGET).ipk
@@ -113,6 +103,7 @@ prepare_files: build
 
 	if [ -d "$(CONTROL_DIR)" ]; then find "$(CONTROL_DIR)" -type f -exec dos2unix {} +; fi
 	if [ -d "$(ETC_DIR)" ]; then find "$(ETC_DIR)" -type f -exec dos2unix {} +; fi
+	if [ -d "$(LIB_DIR)" ]; then find "$(LIB_DIR)" -type f -exec dos2unix {} +; fi
 	if [ -d "$(ETC_DIR)/init.d" ]; then find "$(ETC_DIR)/init.d" -type f -exec dos2unix {} +; fi
 
 	echo "Package: $(PKG_NAME)" > "$(CONTROL_DIR)/control"
@@ -178,6 +169,7 @@ package_apk: prepare_files
 		-I "name:$(PKG_NAME)" \
 		-I "version:$(PKG_VERSION)-r$(PKG_REVISION)" \
 		-I "description:$(PKG_DESCRIPTION)" \
+		-I "depends:$(PKG_DEPENDS)" \
 		-I "arch:$(APK_ARCH)" \
 		-I "license:$(PKG_LICENSE)" \
 		-I "origin:feeds/packages/feeds/tg-ws-proxy/net/$(PKG_NAME)" \

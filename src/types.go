@@ -36,6 +36,13 @@ type Config struct {
 	PprofListen                  string
 	cfproxyMu                    sync.RWMutex
 	cfproxyFailUntil             map[string]time.Time
+	cfworkerFailUntil            map[string]time.Time
+	fallbackDials                map[fallbackDialKey]int
+}
+
+type fallbackDialKey struct {
+	domain string
+	worker bool
 }
 
 type Stats struct {

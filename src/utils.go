@@ -66,6 +66,10 @@ func isTimeoutError(err error) bool {
 		errors.Is(err, os.ErrDeadlineExceeded)
 }
 
+func isFrontingRetryError(err error) bool {
+	return isTimeoutError(err) || isConnectionReset(err)
+}
+
 func setSockOpts(c net.Conn, bufSize int) error {
 	tcp, ok := c.(*net.TCPConn)
 	if !ok {

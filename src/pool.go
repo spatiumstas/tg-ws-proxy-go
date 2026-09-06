@@ -23,6 +23,13 @@ type wsPool struct {
 	mu        sync.Mutex
 	idle      map[wsPoolKey][]pooledWS
 	refilling map[wsPoolKey]bool
+	routes    map[wsPoolKey]poolRoute
+}
+
+type poolRoute struct {
+	domains    []string
+	retryDelay time.Duration
+	retryAfter time.Time
 }
 
 var (
@@ -34,6 +41,7 @@ func newWSPool() *wsPool {
 	return &wsPool{
 		idle:      make(map[wsPoolKey][]pooledWS),
 		refilling: make(map[wsPoolKey]bool),
+		routes:    make(map[wsPoolKey]poolRoute),
 	}
 }
 
@@ -64,11 +72,47 @@ func (p *wsPool) get(cfg *Config, key dcKey, targetIP string, domains []string) 
 }
 
 func (p *wsPool) scheduleRefill(cfg *Config, key wsPoolKey, domains []string) {
-	if cfg.PoolSize <= 0 || p.refilling[key] {
+	if cfg.PoolSize <= 0 {
+		return
+	}
+	route, known := p.routes[key]
+	if !known {
+		route.domains = append([]string(nil), domains...)
+		p.routes[key] = route
+	}
+	if p.refilling[key] || len(p.idle[key]) >= cfg.PoolSize || time.Now().Before(route.retryAfter) ||
+		isBlacklisted(key.DC, key.IsMedia) || (inIPCooldown(key.TargetIP) && !frontingActive()) {
 		return
 	}
 	p.refilling[key] = true
 	go p.refill(cfg, key, domains)
+}
+
+func (p *wsPool) rotate(cfg *Config) {
+	var expired []pooledWS
+	now := time.Now()
+	p.mu.Lock()
+	for key, route := range p.routes {
+		bucket := p.idle[key]
+		ready := bucket[:0]
+		for _, item := range bucket {
+			if now.Sub(item.Created) >= wsPoolMaxAge {
+				expired = append(expired, item)
+			} else {
+				ready = append(ready, item)
+			}
+		}
+		clear(bucket[len(ready):])
+		p.idle[key] = ready
+		p.scheduleRefill(cfg, key, route.domains)
+	}
+	p.mu.Unlock()
+	for _, item := range expired {
+		_ = item.Conn.Close()
+	}
+	if len(expired) > 0 {
+		debugf(cfg, "WS pool rotated: %d expired", len(expired))
+	}
 }
 
 func (p *wsPool) refill(cfg *Config, key wsPoolKey, domains []string) {
@@ -86,7 +130,7 @@ func (p *wsPool) refill(cfg *Config, key wsPoolKey, domains []string) {
 			return
 		}
 		useFronting := frontingActive()
-		if inIPCooldown(key.TargetIP) && !useFronting {
+		if isBlacklisted(key.DC, key.IsMedia) || (inIPCooldown(key.TargetIP) && !useFronting) {
 			return
 		}
 		connect := poolWSConnect
@@ -94,16 +138,34 @@ func (p *wsPool) refill(cfg *Config, key wsPoolKey, domains []string) {
 			connect = poolWSConnectFronting
 		}
 		conn, _, err := connect(key.TargetIP, domains, poolConnectTimeout)
+		if err != nil && !useFronting && isFrontingRetryError(err) {
+			useFronting = true
+			conn, _, err = poolWSConnectFronting(key.TargetIP, domains, poolConnectTimeout)
+			if err == nil {
+				setFrontingActive()
+				atomic.AddInt64(&stats.connectionsFront, 1)
+			}
+		}
 		if err != nil {
+			p.mu.Lock()
+			route := p.routes[key]
+			route.domains = domains
+			route.retryDelay = min(max(route.retryDelay*2, wsPoolBackoffMin), wsPoolBackoffMax)
+			route.retryAfter = time.Now().Add(route.retryDelay)
+			p.routes[key] = route
+			p.mu.Unlock()
+			debugf(cfg, "WS pool refill failed DC%d media=%t via %s, retry in %s: %v",
+				key.DC, key.IsMedia, key.TargetIP, route.retryDelay, err)
 			return
 		}
 		p.mu.Lock()
-		if inIPCooldown(key.TargetIP) && !useFronting {
+		if isBlacklisted(key.DC, key.IsMedia) || (inIPCooldown(key.TargetIP) && !useFronting) {
 			p.mu.Unlock()
 			_ = conn.Close()
 			return
 		}
 		p.idle[key] = append(p.idle[key], pooledWS{Conn: conn, Created: time.Now()})
+		p.routes[key] = poolRoute{domains: domains}
 		p.mu.Unlock()
 	}
 }
@@ -149,4 +211,11 @@ func warmupPool(cfg *Config) {
 		}
 	}
 	logf("INFO   WS pool warmup started for %d DC(s)", len(cfg.DCMap))
+	go func() {
+		ticker := time.NewTicker(wsPoolCheckInterval)
+		defer ticker.Stop()
+		for range ticker.C {
+			pool.rotate(cfg)
+		}
+	}()
 }

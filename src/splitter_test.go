@@ -146,6 +146,22 @@ func TestSplitterDisablesOversizedPacket(t *testing.T) {
 	}
 }
 
+func TestSplitterDisablesUnrepresentableIntermediatePacket(t *testing.T) {
+	ri := testRelayInit(t)
+	ms, err := newMsgSplitter(ri, protoIntermediateInt)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	plain := make([]byte, 4)
+	binary.LittleEndian.PutUint32(plain, 0x7FFFFFFF)
+	ct := encForSplitter(t, ri, plain)
+	parts := ms.split(ct)
+	if len(parts) != 1 || !bytes.Equal(parts[0], ct) {
+		t.Fatal("unrepresentable packet header must disable splitter and pass data through")
+	}
+}
+
 func lensOf(parts [][]byte) []int {
 	out := make([]int, len(parts))
 	for i, p := range parts {

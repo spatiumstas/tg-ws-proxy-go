@@ -308,9 +308,6 @@ func (cfg *Config) cfproxyDomainsForTry(dc int) []string {
 		}
 	}
 	for _, domain := range shuffledDomains(cfg.FallbackCFProxyDomains) {
-		if len(out) == cfProxyMaxAttempts {
-			break
-		}
 		if domain != active && cfg.cfproxyDomainAvailableLocked(domain, now) {
 			out = append(out, domain)
 		}
@@ -327,6 +324,58 @@ func (cfg *Config) cfproxyDomainAvailableLocked(domain string, now time.Time) bo
 		return false
 	}
 	delete(cfg.cfproxyFailUntil, domain)
+	return true
+}
+
+func (cfg *Config) beginFallbackDial(domain string, worker bool) bool {
+	cfg.cfproxyMu.Lock()
+	defer cfg.cfproxyMu.Unlock()
+	domains, failures := cfg.FallbackCFProxyDomains, cfg.cfproxyFailUntil
+	if worker {
+		domains, failures = cfg.FallbackCFProxyWorkerDomains, cfg.cfworkerFailUntil
+	}
+	found := false
+	for _, current := range domains {
+		if current == domain {
+			found = true
+			break
+		}
+	}
+	key := fallbackDialKey{domain: domain, worker: worker}
+	if !found || time.Now().Before(failures[domain]) || cfg.fallbackDials[key] >= fallbackMaxDialsPerDomain {
+		return false
+	}
+	if cfg.fallbackDials == nil {
+		cfg.fallbackDials = make(map[fallbackDialKey]int)
+	}
+	cfg.fallbackDials[key]++
+	return true
+}
+
+func (cfg *Config) finishFallbackDial(domain string, worker bool, err error) bool {
+	cfg.cfproxyMu.Lock()
+	defer cfg.cfproxyMu.Unlock()
+	key := fallbackDialKey{domain: domain, worker: worker}
+	if cfg.fallbackDials[key] <= 1 {
+		delete(cfg.fallbackDials, key)
+	} else {
+		cfg.fallbackDials[key]--
+	}
+	failures := &cfg.cfproxyFailUntil
+	if worker {
+		failures = &cfg.cfworkerFailUntil
+	}
+	if err == nil {
+		delete(*failures, domain)
+		return false
+	}
+	if time.Now().Before((*failures)[domain]) {
+		return false
+	}
+	if *failures == nil {
+		*failures = make(map[string]time.Time)
+	}
+	(*failures)[domain] = time.Now().Add(cfproxyFailureCooldown(err))
 	return true
 }
 

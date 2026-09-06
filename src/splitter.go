@@ -125,14 +125,11 @@ func (m *msgSplitter) nextIntermediateLen() int {
 	if len(m.plainBuf) < 4 {
 		return -1
 	}
-	payloadLen := int(binary.LittleEndian.Uint32(m.plainBuf[:4]) & 0x7FFFFFFF)
-	if payloadLen <= 0 {
+	payloadLen := binary.LittleEndian.Uint32(m.plainBuf[:4]) & 0x7FFFFFFF
+	if payloadLen == 0 || payloadLen > maxSplitterPacketBytes-4 {
 		return 0
 	}
-	packetLen := 4 + payloadLen
-	if packetLen > maxSplitterPacketBytes {
-		return 0
-	}
+	packetLen := 4 + int(payloadLen)
 	if len(m.plainBuf) < packetLen {
 		return -1
 	}

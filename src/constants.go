@@ -16,6 +16,9 @@ const (
 	protoPaddedIntermediateInt = 0xDDDDDDDD
 
 	wsPoolMaxAge                         = 120 * time.Second
+	wsPoolCheckInterval                  = 5 * time.Second
+	wsPoolBackoffMin                     = 5 * time.Second
+	wsPoolBackoffMax                     = time.Minute
 	ipFailCooldown                       = time.Hour
 	dcFailCooldown                       = 60 * time.Second
 	frontingCooldown                     = 30 * time.Minute
@@ -42,6 +45,7 @@ const (
 	defaultCFProxyRefreshInterval        = 1 * time.Hour
 	defaultCFProxyRefreshMinValidDomains = 3
 	cfProxyMaxAttempts                   = 3
+	fallbackMaxDialsPerDomain            = 4
 	cfProxyDNSFailCooldown               = 5 * time.Minute
 	cfProxyFailCooldown                  = 1 * time.Minute
 )

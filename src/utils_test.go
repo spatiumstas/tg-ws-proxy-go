@@ -3,7 +3,10 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"os"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -71,5 +74,18 @@ func TestNewUpstreamDialerUsesKeepAliveConfig(t *testing.T) {
 	}
 	if d.KeepAliveConfig != tcpKeepAliveConfig {
 		t.Fatalf("keepalive config = %#v, want %#v", d.KeepAliveConfig, tcpKeepAliveConfig)
+	}
+}
+
+func TestIsFrontingRetryError(t *testing.T) {
+	for _, err := range []error{testTimeoutError{}, fmt.Errorf("dial: %w", syscall.ECONNRESET)} {
+		if !isFrontingRetryError(err) {
+			t.Errorf("expected fronting retry for %v", err)
+		}
+	}
+	for _, err := range []error{nil, io.EOF, syscall.ECONNREFUSED, errors.New("bad handshake")} {
+		if isFrontingRetryError(err) {
+			t.Errorf("unexpected fronting retry for %v", err)
+		}
 	}
 }

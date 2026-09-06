@@ -101,7 +101,7 @@ EXTRA_ARGS="-v"
 
 ```shell
 cp config/entware/aarch64-3.10.config .config
-make package
+make package PKG_VERSION=1.2.3 PKG_REVISION=1
 ```
 
 

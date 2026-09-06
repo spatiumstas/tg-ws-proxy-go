@@ -308,14 +308,14 @@ func handleMTProtoClient(client net.Conn, cfg *Config, hi *handshakeInfo, secret
 	connectWS := func(timeout time.Duration) (*websocket.Conn, string, bool, bool, bool) {
 		wsFailedRedirect := false
 		allRedirect := true
-		timedOut := false
+		tryFronting := false
 		for _, target := range directTargets {
 			for _, d := range domains {
 				debugf(cfg, "[%s] DC%d%s -> wss://%s/apiws via %s", label, hi.DC, mediaTag, d, target)
 				conn, resp, err := dialWS(target, d, timeout)
 				if err == nil {
 					allRedirect = false
-					return conn, target, wsFailedRedirect, allRedirect, timedOut
+					return conn, target, wsFailedRedirect, allRedirect, tryFronting
 				}
 				atomic.AddInt64(&stats.wsErrors, 1)
 				if resp != nil && isRedirect(resp.StatusCode) {
@@ -324,7 +324,7 @@ func handleMTProtoClient(client net.Conn, cfg *Config, hi *handshakeInfo, secret
 					continue
 				}
 				if isTimeoutError(err) {
-					timedOut = true
+					tryFronting = true
 					allRedirect = false
 					if hasAnyCFFallback {
 						setIPCooldown(target)
@@ -334,9 +334,13 @@ func handleMTProtoClient(client net.Conn, cfg *Config, hi *handshakeInfo, secret
 				}
 				allRedirect = false
 				warnf("[%s] DC%d%s WS connect failed via %s: %v", label, hi.DC, mediaTag, target, err)
+				if isFrontingRetryError(err) {
+					tryFronting = true
+					break
+				}
 			}
 		}
-		return nil, "", wsFailedRedirect, allRedirect, timedOut
+		return nil, "", wsFailedRedirect, allRedirect, tryFronting
 	}
 
 	connectFronting := func(reason string) (*websocket.Conn, string) {
@@ -371,9 +375,9 @@ func handleMTProtoClient(client net.Conn, cfg *Config, hi *handshakeInfo, secret
 		if inCooldown(key) {
 			timeout = wsConnectCooldownTimeout
 		}
-		conn, target, wsFailedRedirect, allRedirect, timedOut := connectWS(timeout)
+		conn, target, wsFailedRedirect, allRedirect, tryFronting := connectWS(timeout)
 		if conn == nil {
-			if timedOut {
+			if tryFronting {
 				if conn, target := connectFronting("fallback"); conn != nil {
 					return conn, target, false
 				}

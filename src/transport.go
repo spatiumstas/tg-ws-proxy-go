@@ -350,6 +350,9 @@ func wsConnectWithDialer(targetIP string, domains []string, timeout time.Duratio
 		}
 		lastErr = err
 		lastResp = resp
+		if isFrontingRetryError(err) {
+			break
+		}
 	}
 	if lastErr == nil {
 		lastErr = errNoDomains
@@ -408,20 +411,28 @@ func cfWorkerFallback(label string, cfg *Config, dc int, isMedia bool, dst strin
 	}
 
 	for _, worker := range cfg.cfproxyWorkerDomainsForTry() {
+		if !cfg.beginFallbackDial(worker, true) {
+			continue
+		}
 		logf("INFO   [%s] DC%d%s -> CF worker wss://%s/apiws?dst=%s", label, dc, mediaTag, worker, dst)
 		ws, _, err := dialWSWorker(worker, dst, dc, wsConnectTimeout)
 		if err != nil {
 			atomic.AddInt64(&stats.wsErrors, 1)
-			warnf("[%s] DC%d%s CF worker %s failed: %v", label, dc, mediaTag, worker, err)
+			if cfg.finishFallbackDial(worker, true, err) {
+				warnf("[%s] DC%d%s CF worker %s failed: %v", label, dc, mediaTag, worker, err)
+			}
 			continue
 		}
 
 		if err := writeWSBinary(ws, relayInit); err != nil {
 			_ = ws.Close()
-			warnf("[%s] DC%d%s CF worker init write failed: %v", label, dc, mediaTag, err)
+			if cfg.finishFallbackDial(worker, true, err) {
+				warnf("[%s] DC%d%s CF worker init write failed: %v", label, dc, mediaTag, err)
+			}
 			continue
 		}
 
+		cfg.finishFallbackDial(worker, true, nil)
 		atomic.AddInt64(&stats.connectionsCF, 1)
 		bridgeWS(label, cfg, dc, isMedia, client, ws, cltDec, cltEnc, tgEnc, tgDec, splitter)
 		return nil
@@ -436,13 +447,21 @@ func cfproxyFallback(label string, cfg *Config, dc int, isMedia bool, client net
 		mediaTag = " media"
 	}
 
+	attempts := 0
 	for _, baseDomain := range cfg.cfproxyDomainsForTry(dc) {
+		if attempts == cfProxyMaxAttempts {
+			break
+		}
+		if !cfg.beginFallbackDial(baseDomain, false) {
+			continue
+		}
+		attempts++
 		domain := fmt.Sprintf("kws%d.%s", dc, baseDomain)
 		debugf(cfg, "[%s] DC%d%s -> CF proxy wss://%s/apiws", label, dc, mediaTag, domain)
 		ws, resp, err := dialWSByDomain(domain, wsConnectTimeout)
 		if err != nil {
 			atomic.AddInt64(&stats.wsErrors, 1)
-			firstFailure := cfg.markCFProxyDomainFailed(baseDomain, cfproxyFailureCooldown(err))
+			firstFailure := cfg.finishFallbackDial(baseDomain, false, err)
 			if resp != nil && isRedirect(resp.StatusCode) {
 				if firstFailure {
 					warnf("[%s] DC%d%s CF proxy got %d from %s; cooling down", label, dc, mediaTag, resp.StatusCode, domain)
@@ -455,12 +474,13 @@ func cfproxyFallback(label string, cfg *Config, dc int, isMedia bool, client net
 
 		if err := writeWSBinary(ws, relayInit); err != nil {
 			_ = ws.Close()
-			if cfg.markCFProxyDomainFailed(baseDomain, cfProxyFailCooldown) {
+			if cfg.finishFallbackDial(baseDomain, false, err) {
 				warnf("[%s] DC%d%s CF proxy init write failed: %v", label, dc, mediaTag, err)
 			}
 			continue
 		}
 
+		cfg.finishFallbackDial(baseDomain, false, nil)
 		atomic.AddInt64(&stats.connectionsCF, 1)
 		cfg.promoteCFProxyDomain(dc, baseDomain)
 		bridgeWS(label, cfg, dc, isMedia, client, ws, cltDec, cltEnc, tgEnc, tgDec, splitter)
