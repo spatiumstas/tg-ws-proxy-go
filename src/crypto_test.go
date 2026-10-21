@@ -43,7 +43,7 @@ func TestSignedDC(t *testing.T) {
 
 func TestWSDomains(t *testing.T) {
 	main := wsDomains(1, false)
-	if len(main) != 2 || main[0] != "kws1.web.telegram.org" || main[1] != "kws1-1.web.telegram.org" {
+	if len(main) != 1 || main[0] != "kws1.web.telegram.org" {
 		t.Errorf("wsDomains(1,false) = %v", main)
 	}
 	media := wsDomains(5, true)

@@ -2,35 +2,9 @@ package main
 
 import (
 	"bytes"
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
 	"encoding/binary"
 	"testing"
 )
-
-func testRelayInit(t *testing.T) []byte {
-	t.Helper()
-	ri := make([]byte, handshakeLen)
-	if _, err := rand.Read(ri); err != nil {
-		t.Fatal(err)
-	}
-	return ri
-}
-
-func encForSplitter(t *testing.T, relayInit, plain []byte) []byte {
-	t.Helper()
-	block, err := aes.NewCipher(relayInit[8:40])
-	if err != nil {
-		t.Fatal(err)
-	}
-	enc := cipher.NewCTR(block, relayInit[40:56])
-	tmp := make([]byte, handshakeLen)
-	enc.XORKeyStream(tmp, make([]byte, handshakeLen))
-	out := make([]byte, len(plain))
-	enc.XORKeyStream(out, plain)
-	return out
-}
 
 func buildIntermediate(sizes ...int) []byte {
 	var out []byte
@@ -44,13 +18,9 @@ func buildIntermediate(sizes ...int) []byte {
 }
 
 func TestSplitterIntermediateWhole(t *testing.T) {
-	ri := testRelayInit(t)
-	ms, err := newMsgSplitter(ri, protoIntermediateInt)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ms := &msgSplitter{proto: protoIntermediateInt}
 	plain := buildIntermediate(8, 12) // packets of 4+8=12 and 4+12=16
-	ct := encForSplitter(t, ri, plain)
+	ct := plain
 
 	parts := ms.split(ct)
 	if len(parts) != 2 {
@@ -61,18 +31,14 @@ func TestSplitterIntermediateWhole(t *testing.T) {
 	}
 	joined := append(append([]byte{}, parts[0]...), parts[1]...)
 	if !bytes.Equal(joined, ct) {
-		t.Error("parts must reconstruct the original ciphertext")
+		t.Error("parts must reconstruct the original plaintext")
 	}
 }
 
 func TestSplitterIntermediateFragmented(t *testing.T) {
-	ri := testRelayInit(t)
-	ms, err := newMsgSplitter(ri, protoIntermediateInt)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ms := &msgSplitter{proto: protoIntermediateInt}
 	plain := buildIntermediate(8, 12)
-	ct := encForSplitter(t, ri, plain)
+	ct := plain
 
 	// First 6 bytes: not even one full packet -> no parts yet.
 	if parts := ms.split(ct[:6]); len(parts) != 0 {
@@ -86,18 +52,14 @@ func TestSplitterIntermediateFragmented(t *testing.T) {
 }
 
 func TestSplitterAbridged(t *testing.T) {
-	ri := testRelayInit(t)
-	ms, err := newMsgSplitter(ri, protoAbridgedInt)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ms := &msgSplitter{proto: protoAbridgedInt}
 	// abridged: 1-byte length n (words), payload n*4 bytes. packet = 1 + n*4.
 	plain := []byte{}
 	plain = append(plain, 2)                   // payload 8 bytes
 	plain = append(plain, make([]byte, 8)...)  //
 	plain = append(plain, 3)                   // payload 12 bytes
 	plain = append(plain, make([]byte, 12)...) //
-	ct := encForSplitter(t, ri, plain)
+	ct := plain
 
 	parts := ms.split(ct)
 	if len(parts) != 2 || len(parts[0]) != 9 || len(parts[1]) != 13 {
@@ -106,15 +68,11 @@ func TestSplitterAbridged(t *testing.T) {
 }
 
 func TestSplitterDisableOnZeroLen(t *testing.T) {
-	ri := testRelayInit(t)
-	ms, err := newMsgSplitter(ri, protoIntermediateInt)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ms := &msgSplitter{proto: protoIntermediateInt}
 	// A zero-length packet header makes nextPacketLen return 0 -> splitter
 	// disables and passes everything through unchanged afterwards.
 	plain := buildIntermediate(0)
-	ct := encForSplitter(t, ri, plain)
+	ct := plain
 	parts := ms.split(ct)
 	if len(parts) != 1 || !bytes.Equal(parts[0], ct) {
 		t.Fatalf("expected single passthrough part on zero-len")
@@ -128,34 +86,26 @@ func TestSplitterDisableOnZeroLen(t *testing.T) {
 }
 
 func TestSplitterDisablesOversizedPacket(t *testing.T) {
-	ri := testRelayInit(t)
-	ms, err := newMsgSplitter(ri, protoIntermediateInt)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ms := &msgSplitter{proto: protoIntermediateInt}
 
 	plain := make([]byte, 4)
 	binary.LittleEndian.PutUint32(plain, maxSplitterPacketBytes)
-	ct := encForSplitter(t, ri, plain)
+	ct := plain
 	parts := ms.split(ct)
 	if len(parts) != 1 || !bytes.Equal(parts[0], ct) {
 		t.Fatal("oversized packet header must disable splitter and pass data through")
 	}
-	if !ms.disabled || len(ms.cipherBuf) != 0 || len(ms.plainBuf) != 0 {
+	if !ms.disabled || len(ms.plainBuf) != 0 {
 		t.Fatal("oversized packet must not remain buffered")
 	}
 }
 
 func TestSplitterDisablesUnrepresentableIntermediatePacket(t *testing.T) {
-	ri := testRelayInit(t)
-	ms, err := newMsgSplitter(ri, protoIntermediateInt)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ms := &msgSplitter{proto: protoIntermediateInt}
 
 	plain := make([]byte, 4)
 	binary.LittleEndian.PutUint32(plain, 0x7FFFFFFF)
-	ct := encForSplitter(t, ri, plain)
+	ct := plain
 	parts := ms.split(ct)
 	if len(parts) != 1 || !bytes.Equal(parts[0], ct) {
 		t.Fatal("unrepresentable packet header must disable splitter and pass data through")

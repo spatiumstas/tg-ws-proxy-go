@@ -85,6 +85,22 @@ func TestVerifyFakeTLSClientHello(t *testing.T) {
 	}
 }
 
+func TestFakeTLSServerHelloStructure(t *testing.T) {
+	sessionID := bytes.Repeat([]byte{0x55}, 32)
+	out, err := buildFakeTLSServerHello(make([]byte, 16), make([]byte, 32), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := 5 + int(binary.BigEndian.Uint16(out[3:5]))
+	want := []byte{0x14, 0x03, 0x03, 0x00, 0x01, 0x01, 0x17, 0x03, 0x03}
+	if next+len(want) > len(out) || !bytes.Equal(out[next:next+len(want)], want) {
+		t.Fatalf("invalid CCS and application data headers at byte %d", next)
+	}
+	if out[43] != 32 || !bytes.Equal(out[44:76], sessionID) {
+		t.Error("server hello must echo the 32-byte session ID")
+	}
+}
+
 func TestWrapFakeTLSRecordsStructure(t *testing.T) {
 	out := wrapFakeTLSRecords(bytes.Repeat([]byte{0xAA}, 5))
 	if len(out) != 5+5 {

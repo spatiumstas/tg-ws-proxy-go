@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"crypto/cipher"
-	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -23,23 +22,39 @@ var ioBufPool = sync.Pool{
 	},
 }
 
-func dialWS(targetIP, domain string, timeout time.Duration) (*websocket.Conn, *http.Response, error) {
-	return dialWSWithSNI(targetIP, domain, domain, timeout)
+func dialWebSocket(ctx context.Context, dialer *websocket.Dialer, endpoint string, headers http.Header) (*websocket.Conn, *http.Response, error) {
+	// Gorilla's HTTP upgrade read has a deadline but does not observe cancellation.
+	netDial := dialer.NetDialContext
+	var stop func() bool
+	dialer.NetDialContext = func(dialCtx context.Context, network, addr string) (net.Conn, error) {
+		conn, err := netDial(dialCtx, network, addr)
+		if err == nil {
+			stop = context.AfterFunc(ctx, func() { _ = conn.Close() })
+		}
+		return conn, err
+	}
+	defer func() {
+		if stop != nil {
+			stop()
+		}
+	}()
+	return dialer.DialContext(ctx, endpoint, headers)
 }
 
-func dialWSFronting(targetIP, domain string, timeout time.Duration) (*websocket.Conn, *http.Response, error) {
-	return dialWSWithSNI(targetIP, domain, "sprinthost.ru", timeout)
+func dialWS(ctx context.Context, targetIP, domain string, timeout time.Duration) (*websocket.Conn, *http.Response, error) {
+	return dialWSWithSNI(ctx, targetIP, domain, domain, timeout)
 }
 
-func dialWSWithSNI(targetIP, domain, sni string, timeout time.Duration) (*websocket.Conn, *http.Response, error) {
+func dialWSFronting(ctx context.Context, targetIP, domain string, timeout time.Duration) (*websocket.Conn, *http.Response, error) {
+	return dialWSWithSNI(ctx, targetIP, domain, "sprinthost.ru", timeout)
+}
+
+func dialWSWithSNI(ctx context.Context, targetIP, domain, sni string, timeout time.Duration) (*websocket.Conn, *http.Response, error) {
 	u := url.URL{Scheme: "wss", Host: domain, Path: "/apiws"}
 	dialer := websocket.Dialer{
 		HandshakeTimeout: timeout,
 		Subprotocols:     []string{"binary"},
-		TLSClientConfig: &tls.Config{
-			ServerName:         sni,
-			InsecureSkipVerify: true,
-		},
+		TLSClientConfig:  upstreamTLSConfig(sni, domain),
 		NetDialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			return newUpstreamDialer(timeout).DialContext(ctx, "tcp", net.JoinHostPort(targetIP, "443"))
 		},
@@ -47,7 +62,7 @@ func dialWSWithSNI(targetIP, domain, sni string, timeout time.Duration) (*websoc
 	headers := http.Header{}
 	headers.Set("Host", domain)
 	headers.Set("Origin", "https://web.telegram.org")
-	return dialer.Dial(u.String(), headers)
+	return dialWebSocket(ctx, &dialer, u.String(), headers)
 }
 
 func writeWSBinary(ws *websocket.Conn, data []byte) error {
@@ -98,6 +113,8 @@ func startIdleWatchdog(lastActivity *atomic.Int64, stop <-chan struct{}, onIdle 
 }
 
 func bridgeWS(label string, cfg *Config, dc int, isMedia bool, client net.Conn, ws *websocket.Conn, cltDec, cltEnc, tgEnc, tgDec cipher.Stream, splitter *msgSplitter) {
+	stop := context.AfterFunc(cfg.context(), func() { _ = ws.Close(); _ = client.Close() })
+	defer stop()
 	mediaTag := ""
 	if isMedia {
 		mediaTag = "m"
@@ -105,12 +122,24 @@ func bridgeWS(label string, cfg *Config, dc int, isMedia bool, client net.Conn, 
 	start := time.Now()
 	var upBytes, downBytes int64
 	var upPkts, downPkts int64
+	var endOnce sync.Once
+	reportEnd := func(operation string, err error) {
+		endOnce.Do(func() {
+			debugf(cfg, "[%s] DC%d%s WS stopping: operation=%s error=%v", label, dc, mediaTag, operation, err)
+		})
+	}
+	debugf(cfg, "[%s] DC%d%s WS bridge started: upstream=%s splitter=%t", label, dc, mediaTag, ws.RemoteAddr(), splitter != nil)
 
 	done := make(chan struct{}, 2)
 	stopIdleWatchdog := make(chan struct{})
 	var lastActivity atomic.Int64
 	lastActivity.Store(time.Now().UnixNano())
+	var progress wsProgress
+	progress.lastUp.Store(start.UnixNano())
+	progress.lastDown.Store(start.UnixNano())
+	progressDone := observeWSProgress(cfg, label, dc, isMedia, &progress, stopIdleWatchdog, 30*time.Second)
 	idleWatchdogDone := startIdleWatchdog(&lastActivity, stopIdleWatchdog, func() {
+		reportEnd("idle_timeout", nil)
 		_ = ws.Close()
 		_ = client.Close()
 	})
@@ -131,6 +160,8 @@ func bridgeWS(label string, cfg *Config, dc int, isMedia bool, client net.Conn, 
 				lastActivity.Store(time.Now().UnixNano())
 				upPending += int64(n)
 				upBytes += int64(n)
+				progress.up.Add(int64(n))
+				progress.lastUp.Store(time.Now().UnixNano())
 				upPkts++
 				if upPending >= statsFlushBytes {
 					atomic.AddInt64(&stats.bytesUp, upPending)
@@ -138,7 +169,6 @@ func bridgeWS(label string, cfg *Config, dc int, isMedia bool, client net.Conn, 
 				}
 				chunk := buf[:n]
 				cltDec.XORKeyStream(chunk, chunk)
-				tgEnc.XORKeyStream(chunk, chunk)
 
 				if splitter != nil {
 					parts := splitter.split(chunk)
@@ -146,25 +176,32 @@ func bridgeWS(label string, cfg *Config, dc int, isMedia bool, client net.Conn, 
 						continue
 					}
 					for _, p := range parts {
+						tgEnc.XORKeyStream(p, p)
 						_ = ws.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
 						if werr := ws.WriteMessage(websocket.BinaryMessage, p); werr != nil {
+							reportEnd("upstream_write", werr)
 							return
 						}
 					}
 				} else {
+					tgEnc.XORKeyStream(chunk, chunk)
 					_ = ws.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
 					if werr := ws.WriteMessage(websocket.BinaryMessage, chunk); werr != nil {
+						reportEnd("upstream_write", werr)
 						return
 					}
 				}
 			}
 			if err != nil {
 				if splitter != nil {
+					reportEnd("client_read", err)
 					for _, p := range splitter.flush() {
+						tgEnc.XORKeyStream(p, p)
 						_ = ws.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
 						_ = ws.WriteMessage(websocket.BinaryMessage, p)
 					}
 				}
+				reportEnd("client_read", err)
 				return
 			}
 		}
@@ -183,6 +220,7 @@ func bridgeWS(label string, cfg *Config, dc int, isMedia bool, client net.Conn, 
 		for {
 			mt, r, err := ws.NextReader()
 			if err != nil {
+				reportEnd("upstream_read", err)
 				return
 			}
 			if mt != websocket.BinaryMessage {
@@ -196,6 +234,8 @@ func bridgeWS(label string, cfg *Config, dc int, isMedia bool, client net.Conn, 
 					n := int64(nr)
 					downPending += n
 					downBytes += n
+					progress.down.Add(n)
+					progress.lastDown.Store(time.Now().UnixNano())
 					if downPending >= statsFlushBytes {
 						atomic.AddInt64(&stats.bytesDown, downPending)
 						downPending = 0
@@ -205,6 +245,7 @@ func bridgeWS(label string, cfg *Config, dc int, isMedia bool, client net.Conn, 
 					cltEnc.XORKeyStream(chunk, chunk)
 					_ = client.SetWriteDeadline(time.Now().Add(ioIdleTimeout))
 					if _, werr := client.Write(chunk); werr != nil {
+						reportEnd("client_write", werr)
 						return
 					}
 				}
@@ -212,6 +253,7 @@ func bridgeWS(label string, cfg *Config, dc int, isMedia bool, client net.Conn, 
 					if rerr == io.EOF {
 						break
 					}
+					reportEnd("upstream_body_read", rerr)
 					return
 				}
 			}
@@ -224,6 +266,7 @@ func bridgeWS(label string, cfg *Config, dc int, isMedia bool, client net.Conn, 
 	_ = client.Close()
 	<-done
 	<-idleWatchdogDone
+	<-progressDone
 	debugf(cfg, "[%s] DC%d%s WS session closed: ^%s (%d pkts) v%s (%d pkts) in %.1fs",
 		label,
 		dc,
@@ -236,18 +279,15 @@ func bridgeWS(label string, cfg *Config, dc int, isMedia bool, client net.Conn, 
 	)
 }
 
-func tcpFallback(client net.Conn, dst string, relayInit []byte, cltDec, cltEnc, tgEnc, tgDec cipher.Stream) error {
-	r, err := newUpstreamDialer(tcpDialTimeout).Dial("tcp", net.JoinHostPort(dst, "443"))
+func tcpFallback(ctx context.Context, client net.Conn, dst string, relayInit []byte, cltDec, cltEnc, tgEnc, tgDec cipher.Stream) error {
+	r, err := connectTCPFallback(ctx, net.JoinHostPort(dst, "443"), relayInit)
 	if err != nil {
-		warnf("TCP fallback to %s:443 failed: %v", dst, err)
 		return err
 	}
 	defer r.Close()
+	stop := context.AfterFunc(ctx, func() { _ = r.Close(); _ = client.Close() })
+	defer stop()
 	atomic.AddInt64(&stats.connectionsTCP, 1)
-
-	if err := writeTCPRelayInit(r, relayInit); err != nil {
-		return err
-	}
 
 	done := make(chan struct{}, 2)
 	stopIdleWatchdog := make(chan struct{})
@@ -332,19 +372,22 @@ func tcpFallback(client net.Conn, dst string, relayInit []byte, cltDec, cltEnc, 
 	return nil
 }
 
-func wsConnect(targetIP string, domains []string, timeout time.Duration) (*websocket.Conn, *http.Response, error) {
-	return wsConnectWithDialer(targetIP, domains, timeout, dialWS)
+func wsConnect(ctx context.Context, targetIP string, domains []string, timeout time.Duration) (*websocket.Conn, *http.Response, error) {
+	return wsConnectWithDialer(ctx, targetIP, domains, timeout, dialWS)
 }
 
-func wsConnectFronting(targetIP string, domains []string, timeout time.Duration) (*websocket.Conn, *http.Response, error) {
-	return wsConnectWithDialer(targetIP, domains, timeout, dialWSFronting)
+func wsConnectFronting(ctx context.Context, targetIP string, domains []string, timeout time.Duration) (*websocket.Conn, *http.Response, error) {
+	return wsConnectWithDialer(ctx, targetIP, domains, timeout, dialWSFronting)
 }
 
-func wsConnectWithDialer(targetIP string, domains []string, timeout time.Duration, dial func(string, string, time.Duration) (*websocket.Conn, *http.Response, error)) (*websocket.Conn, *http.Response, error) {
+func wsConnectWithDialer(ctx context.Context, targetIP string, domains []string, timeout time.Duration, dial func(context.Context, string, string, time.Duration) (*websocket.Conn, *http.Response, error)) (*websocket.Conn, *http.Response, error) {
 	var lastErr error
 	var lastResp *http.Response
 	for _, domain := range domains {
-		conn, resp, err := dial(targetIP, domain, timeout)
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		conn, resp, err := dial(ctx, targetIP, domain, timeout)
 		if err == nil {
 			return conn, resp, nil
 		}
@@ -360,15 +403,12 @@ func wsConnectWithDialer(targetIP string, domains []string, timeout time.Duratio
 	return nil, lastResp, lastErr
 }
 
-func dialWSByDomain(domain string, timeout time.Duration) (*websocket.Conn, *http.Response, error) {
+func dialWSByDomain(ctx context.Context, domain string, timeout time.Duration) (*websocket.Conn, *http.Response, error) {
 	u := url.URL{Scheme: "wss", Host: domain, Path: "/apiws"}
 	dialer := websocket.Dialer{
 		HandshakeTimeout: timeout,
 		Subprotocols:     []string{"binary"},
-		TLSClientConfig: &tls.Config{
-			ServerName:         domain,
-			InsecureSkipVerify: true,
-		},
+		TLSClientConfig:  upstreamTLSConfig(domain, domain),
 		NetDialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			return newUpstreamDialer(timeout).DialContext(ctx, network, addr)
 		},
@@ -376,10 +416,10 @@ func dialWSByDomain(domain string, timeout time.Duration) (*websocket.Conn, *htt
 	headers := http.Header{}
 	headers.Set("Host", domain)
 	headers.Set("Origin", "https://web.telegram.org")
-	return dialer.Dial(u.String(), headers)
+	return dialWebSocket(ctx, &dialer, u.String(), headers)
 }
 
-func dialWSWorker(worker, dst string, dc int, timeout time.Duration) (*websocket.Conn, *http.Response, error) {
+func dialWSWorker(ctx context.Context, worker, dst string, dc int, timeout time.Duration) (*websocket.Conn, *http.Response, error) {
 	q := url.Values{}
 	q.Set("dst", dst)
 	q.Set("dc", strconv.Itoa(dc))
@@ -387,10 +427,7 @@ func dialWSWorker(worker, dst string, dc int, timeout time.Duration) (*websocket
 	dialer := websocket.Dialer{
 		HandshakeTimeout: timeout,
 		Subprotocols:     []string{"binary"},
-		TLSClientConfig: &tls.Config{
-			ServerName:         worker,
-			InsecureSkipVerify: true,
-		},
+		TLSClientConfig:  upstreamTLSConfig(worker, worker),
 		NetDialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			return newUpstreamDialer(timeout).DialContext(ctx, network, addr)
 		},
@@ -398,47 +435,38 @@ func dialWSWorker(worker, dst string, dc int, timeout time.Duration) (*websocket
 	headers := http.Header{}
 	headers.Set("Host", worker)
 	headers.Set("Origin", "https://web.telegram.org")
-	return dialer.Dial(u.String(), headers)
+	return dialWebSocket(ctx, &dialer, u.String(), headers)
 }
 
-func cfWorkerFallback(label string, cfg *Config, dc int, isMedia bool, dst string, client net.Conn, relayInit []byte, cltDec, cltEnc, tgEnc, tgDec cipher.Stream, splitter *msgSplitter) error {
-	mediaTag := ""
-	if isMedia {
-		mediaTag = " media"
-	}
+func cfWorkerFallback(label string, cfg *Config, dc int, isMedia bool, dst string, client net.Conn, relayInit []byte, cltDec, cltEnc, tgEnc, tgDec cipher.Stream) error {
 	if dst == "" {
 		return errNoDomains
 	}
-
-	for _, worker := range cfg.cfproxyWorkerDomainsForTry() {
-		if !cfg.beginFallbackDial(worker, true) {
-			continue
-		}
-		logf("INFO   [%s] DC%d%s -> CF worker wss://%s/apiws?dst=%s", label, dc, mediaTag, worker, dst)
-		ws, _, err := dialWSWorker(worker, dst, dc, wsConnectTimeout)
+	key := workerPoolKey{dc: dc, dst: dst}
+	item, ok := workers.get(cfg, key)
+	var ws *websocket.Conn
+	if ok {
+		ws = item.conn
+		debugf(cfg, "[%s] DC%d Worker pool hit via %s", label, dc, item.domain)
+		stop := context.AfterFunc(cfg.context(), func() { _ = item.conn.Close() })
+		err := writeWSBinary(ws, relayInit)
+		stop()
 		if err != nil {
-			atomic.AddInt64(&stats.wsErrors, 1)
-			if cfg.finishFallbackDial(worker, true, err) {
-				warnf("[%s] DC%d%s CF worker %s failed: %v", label, dc, mediaTag, worker, err)
-			}
-			continue
-		}
-
-		if err := writeWSBinary(ws, relayInit); err != nil {
 			_ = ws.Close()
-			if cfg.finishFallbackDial(worker, true, err) {
-				warnf("[%s] DC%d%s CF worker init write failed: %v", label, dc, mediaTag, err)
-			}
-			continue
+			ws = nil
 		}
-
-		cfg.finishFallbackDial(worker, true, nil)
-		atomic.AddInt64(&stats.connectionsCF, 1)
-		bridgeWS(label, cfg, dc, isMedia, client, ws, cltDec, cltEnc, tgEnc, tgDec, splitter)
-		return nil
 	}
-
-	return errNoDomains
+	if ws == nil {
+		conn, _, err := connectWorker(cfg.context(), cfg, dc, dst, relayInit)
+		if err != nil {
+			return err
+		}
+		ws = conn
+		workers.refill(cfg, key)
+	}
+	atomic.AddInt64(&stats.connectionsCF, 1)
+	bridgeWS(label, cfg, dc, isMedia, client, ws, cltDec, cltEnc, tgEnc, tgDec, nil)
+	return nil
 }
 
 func cfproxyFallback(label string, cfg *Config, dc int, isMedia bool, client net.Conn, relayInit []byte, cltDec, cltEnc, tgEnc, tgDec cipher.Stream, splitter *msgSplitter) error {
@@ -449,6 +477,9 @@ func cfproxyFallback(label string, cfg *Config, dc int, isMedia bool, client net
 
 	attempts := 0
 	for _, baseDomain := range cfg.cfproxyDomainsForTry(dc) {
+		if err := cfg.context().Err(); err != nil {
+			return err
+		}
 		if attempts == cfProxyMaxAttempts {
 			break
 		}
@@ -458,7 +489,9 @@ func cfproxyFallback(label string, cfg *Config, dc int, isMedia bool, client net
 		attempts++
 		domain := fmt.Sprintf("kws%d.%s", dc, baseDomain)
 		debugf(cfg, "[%s] DC%d%s -> CF proxy wss://%s/apiws", label, dc, mediaTag, domain)
-		ws, resp, err := dialWSByDomain(domain, wsConnectTimeout)
+		dialStart := time.Now()
+		ws, resp, err := dialWSByDomain(cfg.context(), domain, wsConnectTimeout)
+		debugWSDial(cfg, fmt.Sprintf("[%s] DC%d%s CF %s", label, dc, mediaTag, domain), resp, err, time.Since(dialStart))
 		if err != nil {
 			atomic.AddInt64(&stats.wsErrors, 1)
 			firstFailure := cfg.finishFallbackDial(baseDomain, false, err)
@@ -472,7 +505,13 @@ func cfproxyFallback(label string, cfg *Config, dc int, isMedia bool, client net
 			continue
 		}
 
-		if err := writeWSBinary(ws, relayInit); err != nil {
+		stop := context.AfterFunc(cfg.context(), func() { _ = ws.Close() })
+		err = writeWSBinary(ws, relayInit)
+		stop()
+		if cfg.context().Err() != nil {
+			err = context.Canceled
+		}
+		if err != nil {
 			_ = ws.Close()
 			if cfg.finishFallbackDial(baseDomain, false, err) {
 				warnf("[%s] DC%d%s CF proxy init write failed: %v", label, dc, mediaTag, err)
@@ -483,6 +522,7 @@ func cfproxyFallback(label string, cfg *Config, dc int, isMedia bool, client net
 		cfg.finishFallbackDial(baseDomain, false, nil)
 		atomic.AddInt64(&stats.connectionsCF, 1)
 		cfg.promoteCFProxyDomain(dc, baseDomain)
+		debugf(cfg, "[%s] DC%d%s route=CF domain=%s init=ok", label, dc, mediaTag, domain)
 		bridgeWS(label, cfg, dc, isMedia, client, ws, cltDec, cltEnc, tgEnc, tgDec, splitter)
 		return nil
 	}

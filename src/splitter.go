@@ -1,29 +1,13 @@
 package main
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
 	"encoding/binary"
 )
 
 type msgSplitter struct {
-	dec       cipher.Stream
-	proto     uint32
-	cipherBuf []byte
-	plainBuf  []byte
-	disabled  bool
-}
-
-func newMsgSplitter(relayInit []byte, proto uint32) (*msgSplitter, error) {
-	b, err := aes.NewCipher(relayInit[8:40])
-	if err != nil {
-		return nil, err
-	}
-	dec := cipher.NewCTR(b, relayInit[40:56])
-	zero := make([]byte, handshakeLen)
-	tmp := make([]byte, handshakeLen)
-	dec.XORKeyStream(tmp, zero)
-	return &msgSplitter{dec: dec, proto: proto}, nil
+	proto    uint32
+	plainBuf []byte
+	disabled bool
 }
 
 func (m *msgSplitter) split(chunk []byte) [][]byte {
@@ -34,49 +18,42 @@ func (m *msgSplitter) split(chunk []byte) [][]byte {
 		return [][]byte{chunk}
 	}
 
-	if len(m.cipherBuf)+len(chunk) > maxSplitterPacketBytes {
+	if len(m.plainBuf)+len(chunk) > maxSplitterPacketBytes {
 		parts := make([][]byte, 0, 2)
-		if len(m.cipherBuf) > 0 {
-			parts = append(parts, m.cipherBuf)
+		if len(m.plainBuf) > 0 {
+			parts = append(parts, m.plainBuf)
 		}
 		parts = append(parts, chunk)
-		m.cipherBuf = nil
 		m.plainBuf = nil
 		m.disabled = true
 		return parts
 	}
 
-	m.cipherBuf = append(m.cipherBuf, chunk...)
-	plainStart := len(m.plainBuf)
-	m.plainBuf = append(m.plainBuf, make([]byte, len(chunk))...)
-	m.dec.XORKeyStream(m.plainBuf[plainStart:], chunk)
+	m.plainBuf = append(m.plainBuf, chunk...)
 
 	parts := make([][]byte, 0, 2)
-	for len(m.cipherBuf) > 0 {
+	for len(m.plainBuf) > 0 {
 		next := m.nextPacketLen()
 		if next < 0 {
 			break
 		}
 		if next == 0 {
-			parts = append(parts, m.cipherBuf)
-			m.cipherBuf = m.cipherBuf[:0]
+			parts = append(parts, m.plainBuf)
 			m.plainBuf = m.plainBuf[:0]
 			m.disabled = true
 			break
 		}
-		parts = append(parts, m.cipherBuf[:next])
-		m.cipherBuf = m.cipherBuf[next:]
+		parts = append(parts, m.plainBuf[:next])
 		m.plainBuf = m.plainBuf[next:]
 	}
 	return parts
 }
 
 func (m *msgSplitter) flush() [][]byte {
-	if len(m.cipherBuf) == 0 {
+	if len(m.plainBuf) == 0 {
 		return nil
 	}
-	tail := m.cipherBuf
-	m.cipherBuf = m.cipherBuf[:0]
+	tail := m.plainBuf
 	m.plainBuf = m.plainBuf[:0]
 	return [][]byte{tail}
 }

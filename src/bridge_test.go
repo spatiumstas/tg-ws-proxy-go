@@ -20,6 +20,11 @@ const (
 )
 
 func TestBridgeWSByteIntegrity(t *testing.T) {
+	t.Run("packets", func(t *testing.T) { testBridgeWSByteIntegrity(t, &msgSplitter{proto: protoIntermediateInt}) })
+	t.Run("tunnel", func(t *testing.T) { testBridgeWSByteIntegrity(t, nil) })
+}
+
+func testBridgeWSByteIntegrity(t *testing.T, splitter *msgSplitter) {
 	secret := make([]byte, 16)
 	clientDecI := make([]byte, prekeyLen+ivLen)
 	relayInit := make([]byte, handshakeLen)
@@ -32,7 +37,7 @@ func TestBridgeWSByteIntegrity(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	upPlain := []byte("upstream-payload-from-client-app")
+	upPlain := buildIntermediate(8, 12, 100000)
 	downPlain := []byte("downstream-payload-from-telegram")
 	upCh := make(chan []byte, 1)
 
@@ -44,9 +49,13 @@ func TestBridgeWSByteIntegrity(t *testing.T) {
 		}
 		defer c.Close()
 		// Receive upstream (proxy re-encrypted for Telegram) and decrypt.
-		_, c2, err := c.ReadMessage()
-		if err != nil {
-			return
+		var c2 []byte
+		for len(c2) < len(upPlain) {
+			_, part, err := c.ReadMessage()
+			if err != nil {
+				return
+			}
+			c2 = append(c2, part...)
 		}
 		up := make([]byte, len(c2))
 		peerTgEnc.XORKeyStream(up, c2)
@@ -70,7 +79,7 @@ func TestBridgeWSByteIntegrity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	go bridgeWS("test", &Config{}, 2, false, clientProxy, ws, cltDec, cltEnc, tgEnc, tgDec, nil)
+	go bridgeWS("test", &Config{}, 2, false, clientProxy, ws, cltDec, cltEnc, tgEnc, tgDec, splitter)
 
 	// Client app sends upstream (encrypted with its send stream == proxy cltDec).
 	c := make([]byte, len(upPlain))

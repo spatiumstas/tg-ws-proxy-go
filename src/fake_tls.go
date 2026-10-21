@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -36,7 +37,7 @@ var (
 		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-		0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 		0x20,
 		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -68,7 +69,7 @@ func fakeTLSConnectLink(host string, port int, secretHex, domain string) string 
 	)
 }
 
-func acceptFakeTLSClient(client net.Conn, secret []byte, maskingDomain string, label string) (net.Conn, []byte, bool) {
+func acceptFakeTLSClient(ctx context.Context, client net.Conn, secret []byte, maskingDomain string, label string) (net.Conn, []byte, bool) {
 	_ = client.SetReadDeadline(time.Now().Add(clientHandshakeTimeout))
 	first := make([]byte, 1)
 	if _, err := io.ReadFull(client, first); err != nil {
@@ -99,7 +100,7 @@ func acceptFakeTLSClient(client net.Conn, secret []byte, maskingDomain string, l
 	clientRandom, sessionID, ok := verifyFakeTLSClientHello(clientHello, secret)
 	if !ok {
 		log.Printf("INFO   [%s] Fake TLS verify failed -> masking", label)
-		proxyToMaskingDomain(client, clientHello, maskingDomain, label)
+		proxyToMaskingDomain(ctx, client, clientHello, maskingDomain, label)
 		return nil, nil, false
 	}
 
@@ -215,13 +216,15 @@ func writeFakeTLSRedirect(client net.Conn, domain string) error {
 	return err
 }
 
-func proxyToMaskingDomain(client net.Conn, initial []byte, domain string, label string) {
-	upstream, err := newUpstreamDialer(tcpDialTimeout).Dial("tcp", net.JoinHostPort(domain, "443"))
+func proxyToMaskingDomain(ctx context.Context, client net.Conn, initial []byte, domain string, label string) {
+	upstream, err := newUpstreamDialer(tcpDialTimeout).DialContext(ctx, "tcp", net.JoinHostPort(domain, "443"))
 	if err != nil {
 		log.Printf("INFO   [%s] masking connect failed: %v", label, err)
 		return
 	}
 	defer upstream.Close()
+	stop := context.AfterFunc(ctx, func() { _ = upstream.Close(); _ = client.Close() })
+	defer stop()
 
 	log.Printf("INFO   [%s] masking -> %s:443", label, domain)
 	if len(initial) > 0 {
