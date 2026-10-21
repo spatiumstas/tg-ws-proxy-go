@@ -40,6 +40,9 @@ func TestParseFlagsDefaults(t *testing.T) {
 	if cfg.SecretHex != okSecret {
 		t.Errorf("secret = %q", cfg.SecretHex)
 	}
+	if cfg.FallbackCFProxyDomainsURL != defaultCFProxyDomainsURL || len(cfg.FallbackCFProxyDomains) != 20 {
+		t.Fatalf("CF bootstrap: URL=%q domains=%d", cfg.FallbackCFProxyDomainsURL, len(cfg.FallbackCFProxyDomains))
+	}
 }
 
 func TestParseFlagsGenSecret(t *testing.T) {

@@ -4,6 +4,7 @@ ENABLED=yes
 PROCS=tg-ws-proxy
 DESC="TG WS Proxy"
 PATH=/opt/sbin:/opt/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export SSL_CERT_DIR="${SSL_CERT_DIR:-/opt/etc/ssl/certs}"
 
 ACTION=$1
 CALLER=$2
@@ -119,6 +120,11 @@ start() {
 stop() {
   echo -e -n "$ansi_white Shutting down $PROC... $ansi_std"
   killall $PROC 2>/dev/null
+
+  for stop_wait in 1 2 3 4 5 6 7 8 9 10; do
+    [ -z "`pidof $PROC`" ] && break
+    sleep 1
+  done
 
   if [ -n "`pidof $PROC`" ]; then
     echo -e "            $ansi_red failed. $ansi_std"

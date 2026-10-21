@@ -169,7 +169,6 @@ func wsDomains(dc int, isMedia bool) []string {
 	}
 	return []string{
 		"kws" + dcS + ".web.telegram.org",
-		"kws" + dcS + "-1.web.telegram.org",
 	}
 }
 

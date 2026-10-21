@@ -1,10 +1,26 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestDomainCensorWriter(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"wss://worker.sub.example.com/apiws?dst=192.0.2.1", "wss://wor***.s**.exa****.com/apiws?dst=192.0.2.1"},
+		{"dial tcp: lookup example.com: no such host", "dial tcp: lookup exa****.com: no such host"},
+		{"kws2.web.telegram.org /opt/var/log/tg-ws-proxy.log.1 192.0.2.1", "kws2.web.telegram.org /opt/var/log/tg-ws-proxy.log.1 192.0.2.1"},
+		{"UPPER.EXAMPLE.COM up=1024 down=4096", "UP***.EXA****.COM up=1024 down=4096"},
+	} {
+		var out bytes.Buffer
+		n, err := (domainCensorWriter{out: &out}).Write([]byte(tc.in))
+		if err != nil || n != len(tc.in) || out.String() != tc.want {
+			t.Errorf("mask(%q) = %q, n=%d err=%v; want %q", tc.in, out.String(), n, err, tc.want)
+		}
+	}
+}
 
 func TestRotatingWriter(t *testing.T) {
 	dir := t.TempDir()

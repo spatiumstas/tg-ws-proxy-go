@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -84,7 +85,7 @@ func TestPoolRefillKeepsSizeLimit(t *testing.T) {
 	var cleanupsMu sync.Mutex
 	var cleanups []func()
 	var calls int64
-	poolWSConnect = func(string, []string, time.Duration) (*websocket.Conn, *http.Response, error) {
+	poolWSConnect = func(context.Context, string, []string, time.Duration) (*websocket.Conn, *http.Response, error) {
 		atomic.AddInt64(&calls, 1)
 		conn, _, err := websocket.DefaultDialer.Dial(url, nil)
 		if err != nil {
@@ -135,7 +136,7 @@ func TestPoolRefillDialsSequentially(t *testing.T) {
 	var cleanups []func()
 	var active int64
 	var maxActive int64
-	poolWSConnect = func(string, []string, time.Duration) (*websocket.Conn, *http.Response, error) {
+	poolWSConnect = func(context.Context, string, []string, time.Duration) (*websocket.Conn, *http.Response, error) {
 		cur := atomic.AddInt64(&active, 1)
 		for {
 			max := atomic.LoadInt64(&maxActive)
@@ -172,55 +173,6 @@ func TestPoolRefillDialsSequentially(t *testing.T) {
 	}
 }
 
-func TestPoolRefillUsesFrontingDuringIPCooldown(t *testing.T) {
-	origConnect := poolWSConnect
-	origFrontingConnect := poolWSConnectFronting
-	defer func() {
-		poolWSConnect = origConnect
-		poolWSConnectFronting = origFrontingConnect
-		clearFrontingActive()
-	}()
-
-	const targetIP = "1.2.3.4"
-	ipFuMu.Lock()
-	oldCooldown, hadCooldown := ipFailUntil[targetIP]
-	ipFailUntil[targetIP] = time.Now().Add(time.Hour)
-	ipFuMu.Unlock()
-	defer func() {
-		ipFuMu.Lock()
-		if hadCooldown {
-			ipFailUntil[targetIP] = oldCooldown
-		} else {
-			delete(ipFailUntil, targetIP)
-		}
-		ipFuMu.Unlock()
-	}()
-
-	conn, cleanup := dialTestWS(t)
-	defer cleanup()
-	var frontingCalls int64
-	poolWSConnect = func(string, []string, time.Duration) (*websocket.Conn, *http.Response, error) {
-		t.Fatal("regular WS dial must not run during IP cooldown")
-		return nil, nil, nil
-	}
-	poolWSConnectFronting = func(string, []string, time.Duration) (*websocket.Conn, *http.Response, error) {
-		atomic.AddInt64(&frontingCalls, 1)
-		return conn, nil, nil
-	}
-
-	setFrontingActive()
-	p := newWSPool()
-	key := wsPoolKey{DC: 1, TargetIP: targetIP}
-	p.refill(&Config{PoolSize: 1}, key, []string{"d"})
-
-	if got := atomic.LoadInt64(&frontingCalls); got != 1 {
-		t.Fatalf("fronting dials = %d, want 1", got)
-	}
-	if got := len(p.idle[key]); got != 1 {
-		t.Fatalf("pool size = %d, want 1", got)
-	}
-}
-
 func TestPoolSeparatesTargets(t *testing.T) {
 	conn, cleanup := dialTestWS(t)
 	defer cleanup()
@@ -231,18 +183,6 @@ func TestPoolSeparatesTargets(t *testing.T) {
 
 	if got := p.get(&Config{PoolSize: 0}, key, "5.6.7.8", []string{"d"}); got != nil {
 		t.Fatal("pool must not reuse a connection opened through a different target IP")
-	}
-}
-
-func TestPoolDiscardsTarget(t *testing.T) {
-	conn, cleanup := dialTestWS(t)
-	defer cleanup()
-
-	p := newWSPool()
-	p.idle[wsPoolKey{DC: 1, TargetIP: "1.2.3.4"}] = []pooledWS{{Conn: conn, Created: time.Now()}}
-	p.discardTarget("1.2.3.4")
-	if len(p.idle) != 0 {
-		t.Fatal("discardTarget must remove all pooled connections for the target IP")
 	}
 }
 
@@ -269,7 +209,7 @@ func TestPoolRotationReplacesExpiredWithoutClient(t *testing.T) {
 	orig := poolWSConnect
 	defer func() { poolWSConnect = orig }()
 	var calls atomic.Int64
-	poolWSConnect = func(string, []string, time.Duration) (*websocket.Conn, *http.Response, error) {
+	poolWSConnect = func(context.Context, string, []string, time.Duration) (*websocket.Conn, *http.Response, error) {
 		calls.Add(1)
 		return fresh, nil, nil
 	}
@@ -300,7 +240,7 @@ func TestPoolBackoffAndRecoveryWithoutClient(t *testing.T) {
 	defer cleanup()
 	var calls atomic.Int64
 	var healthy atomic.Bool
-	poolWSConnect = func(string, []string, time.Duration) (*websocket.Conn, *http.Response, error) {
+	poolWSConnect = func(context.Context, string, []string, time.Duration) (*websocket.Conn, *http.Response, error) {
 		calls.Add(1)
 		if healthy.Load() {
 			return conn, nil, nil
@@ -337,33 +277,6 @@ func TestPoolBackoffAndRecoveryWithoutClient(t *testing.T) {
 	}
 }
 
-func TestPoolRotationRespectsBlockedRoutes(t *testing.T) {
-	orig := poolWSConnect
-	defer func() { poolWSConnect = orig }()
-	var calls atomic.Int64
-	poolWSConnect = func(string, []string, time.Duration) (*websocket.Conn, *http.Response, error) {
-		calls.Add(1)
-		return nil, nil, errors.New("unexpected dial")
-	}
-	p := newWSPool()
-	key := wsPoolKey{DC: 1, TargetIP: "192.0.2.3"}
-	p.routes[key] = poolRoute{domains: []string{"d"}}
-	setIPCooldown(key.TargetIP)
-	defer clearIPCooldown(key.TargetIP)
-	cfg := &Config{PoolSize: 1}
-	p.rotate(cfg)
-	waitPoolRefill(t, p, key)
-	clearIPCooldown(key.TargetIP)
-	dc := dcKey{DC: key.DC}
-	setBlacklisted(dc)
-	defer func() { blMu.Lock(); delete(blacklist, dc); blMu.Unlock() }()
-	p.rotate(cfg)
-	waitPoolRefill(t, p, key)
-	if calls.Load() != 0 {
-		t.Fatal("rotation must not dial cooled-down or blacklisted routes")
-	}
-}
-
 func TestPoolRefillRetriesFronting(t *testing.T) {
 	for _, dialErr := range []error{testTimeoutError{}, fmt.Errorf("dial: %w", syscall.ECONNRESET), errors.New("other")} {
 		t.Run(dialErr.Error(), func(t *testing.T) {
@@ -375,11 +288,11 @@ func TestPoolRefillRetriesFronting(t *testing.T) {
 			conn, cleanup := dialTestWS(t)
 			defer cleanup()
 			var order []string
-			poolWSConnect = func(string, []string, time.Duration) (*websocket.Conn, *http.Response, error) {
+			poolWSConnect = func(context.Context, string, []string, time.Duration) (*websocket.Conn, *http.Response, error) {
 				order = append(order, "direct")
 				return nil, nil, dialErr
 			}
-			poolWSConnectFronting = func(string, []string, time.Duration) (*websocket.Conn, *http.Response, error) {
+			poolWSConnectFronting = func(context.Context, string, []string, time.Duration) (*websocket.Conn, *http.Response, error) {
 				order = append(order, "fronting")
 				return conn, nil, nil
 			}
@@ -407,7 +320,7 @@ func TestPoolConcurrentGetAndRotationShareRefill(t *testing.T) {
 	defer cleanup()
 	var calls atomic.Int64
 	release := make(chan struct{})
-	poolWSConnect = func(string, []string, time.Duration) (*websocket.Conn, *http.Response, error) {
+	poolWSConnect = func(context.Context, string, []string, time.Duration) (*websocket.Conn, *http.Response, error) {
 		calls.Add(1)
 		<-release
 		return conn, nil, nil

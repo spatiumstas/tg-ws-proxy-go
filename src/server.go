@@ -1,21 +1,25 @@
 package main
 
 import (
+	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
-
-	"github.com/gorilla/websocket"
 )
 
 func main() {
+	log.SetOutput(domainCensorWriter{out: os.Stderr})
 	cfg, err := parseFlags(os.Args[1:])
 	if err != nil {
 		log.Fatalf("config error: %v", err)
@@ -35,8 +39,16 @@ func main() {
 	}
 
 	initLogger(cfg)
-	startPprof(cfg)
-	startCFProxyDomainRefresh(cfg)
+	ln, err := net.Listen("tcp", net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port)))
+	if err != nil {
+		log.Fatalf("listen error: %v", err)
+	}
+	defer ln.Close()
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	cfg.ctx = ctx
+	pprofDone := startPprof(ctx, cfg)
+	refreshDone := startCFProxyDomainRefresh(ctx, cfg)
 
 	linkHost := getLinkHost(cfg.Host)
 	log.Printf("INFO   %s", strings.Repeat("=", 60))
@@ -58,7 +70,7 @@ func main() {
 		}
 		refreshMode := "off"
 		if cfg.FallbackCFProxyRefresh && !cfg.FallbackCFProxyUserDomain && strings.TrimSpace(cfg.FallbackCFProxyDomainsURL) != "" {
-			refreshMode = "startup"
+			refreshMode = "hourly"
 		}
 		log.Printf("INFO     CF proxy:      active=%s pool=%d (%s, refresh=%s)", cfg.cfproxyActiveDomain(), cfg.cfproxyDomainPoolSize(), prio, refreshMode)
 	}
@@ -74,20 +86,45 @@ func main() {
 	}
 	log.Printf("INFO   %s", strings.Repeat("=", 60))
 
+	statsDone := make(chan struct{})
 	go func() {
+		defer close(statsDone)
+		ticker := time.NewTicker(statsLogInterval)
+		defer ticker.Stop()
 		for {
-			time.Sleep(statsLogInterval)
-			log.Printf("INFO   stats: %s", stats.summary())
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				log.Printf("INFO   stats: %s", stats.summary())
+			}
 		}
 	}()
+	pool.warmup(cfg)
+	workers.warmup(cfg)
+	stopPools := context.AfterFunc(ctx, func() { pool.Close(); workers.Close() })
+	defer stopPools()
+	defer func() {
+		cancel()
+		pool.Close()
+		workers.Close()
+		<-statsDone
+		<-refreshDone
+		<-pprofDone
+	}()
 
-	warmupPool(cfg)
-
-	ln, err := net.Listen("tcp", net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port)))
-	if err != nil {
-		log.Fatalf("listen error: %v", err)
+	if err := serve(ctx, ln, cfg); err != nil && !errors.Is(err, context.Canceled) {
+		log.Printf("ERROR  server stopped: %v", err)
 	}
-	defer ln.Close()
+}
+
+func serve(ctx context.Context, ln net.Listener, cfg *Config) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stopAccept := context.AfterFunc(ctx, func() { _ = ln.Close() })
+	defer stopAccept()
+	var clients sync.WaitGroup
+	defer func() { cancel(); clients.Wait() }()
 
 	secret, _ := hex.DecodeString(cfg.SecretHex)
 	sessionsSem := make(chan struct{}, cfg.MaxConns)
@@ -101,6 +138,12 @@ func main() {
 		}
 		c, err := ln.Accept()
 		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if errors.Is(err, net.ErrClosed) {
+				return err
+			}
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
 				acceptBackoff = acceptBackoffMin
 				continue
@@ -118,7 +161,11 @@ func main() {
 
 		select {
 		case sessionsSem <- struct{}{}:
+			clients.Add(1)
 			go func(conn net.Conn) {
+				defer clients.Done()
+				stopClient := context.AfterFunc(ctx, func() { _ = conn.Close() })
+				defer stopClient()
 				defer func() { <-sessionsSem }()
 				defer func() {
 					if r := recover(); r != nil {
@@ -145,7 +192,7 @@ func handleClient(client net.Conn, cfg *Config, secret []byte) {
 
 	handshakeConn := client
 	if cfg.FakeTLSDomain != "" {
-		fconn, hs, ok := acceptFakeTLSClient(client, secret, cfg.FakeTLSDomain, label)
+		fconn, hs, ok := acceptFakeTLSClient(cfg.context(), client, secret, cfg.FakeTLSDomain, label)
 		if !ok {
 			return
 		}
@@ -177,20 +224,6 @@ func handleClient(client net.Conn, cfg *Config, secret []byte) {
 	handleMTProtoClient(handshakeConn, cfg, hi, secret, label)
 }
 
-func splitWSTargets(targets []string, skipCooldown bool) (directTargets, frontingTargets []string) {
-	frontingTargets = targets
-	if !skipCooldown {
-		return targets, frontingTargets
-	}
-	directTargets = make([]string, 0, len(targets))
-	for _, target := range targets {
-		if !inIPCooldown(target) {
-			directTargets = append(directTargets, target)
-		}
-	}
-	return directTargets, frontingTargets
-}
-
 func handleMTProtoClient(client net.Conn, cfg *Config, hi *handshakeInfo, secret []byte, label string) {
 	protoInt := protoFromTag(hi.ProtoTag)
 	mediaTag := ""
@@ -213,17 +246,7 @@ func handleMTProtoClient(client net.Conn, cfg *Config, hi *handshakeInfo, secret
 		return ms
 	}
 
-	doFallback := func(setState bool, wsFailedRedirect bool, allRedirect bool, primaryTarget string) {
-		key := dcKey{DC: hi.DC, IsMedia: hi.IsMedia}
-		if setState {
-			if wsFailedRedirect && allRedirect {
-				setBlacklisted(key)
-				warnf("[%s] DC%d%s blacklisted for WS (all redirects)", label, hi.DC, mediaTag)
-			} else {
-				setCooldown(key)
-			}
-		}
-
+	doFallback := func(primaryTarget string) {
 		fallback := fallbackIP(hi.DC)
 		if fallback == "" {
 			fallback = primaryTarget
@@ -231,7 +254,7 @@ func handleMTProtoClient(client net.Conn, cfg *Config, hi *handshakeInfo, secret
 
 		useWorker := cfg.hasCFProxyWorkerDomains()
 		tryWorker := func() bool {
-			if err := cfWorkerFallback(label, cfg, hi.DC, hi.IsMedia, fallback, client, relayInit, cltDec, cltEnc, tgEnc, tgDec, nil); err == nil {
+			if err := cfWorkerFallback(label, cfg, hi.DC, hi.IsMedia, fallback, client, relayInit, cltDec, cltEnc, tgEnc, tgDec); err == nil {
 				log.Printf("INFO   [%s] DC%d%s CF worker fallback closed", label, hi.DC, mediaTag)
 				return true
 			}
@@ -251,8 +274,7 @@ func handleMTProtoClient(client net.Conn, cfg *Config, hi *handshakeInfo, secret
 			if fallback == "" {
 				return false
 			}
-			log.Printf("INFO   [%s] DC%d%s -> TCP fallback to %s:443", label, hi.DC, mediaTag, fallback)
-			err := tcpFallback(client, fallback, relayInit, cltDec, cltEnc, tgEnc, tgDec)
+			err := tcpFallback(cfg.context(), client, fallback, relayInit, cltDec, cltEnc, tgEnc, tgDec)
 			if err == nil {
 				log.Printf("INFO   [%s] DC%d%s TCP fallback closed", label, hi.DC, mediaTag)
 				return true
@@ -279,158 +301,25 @@ func handleMTProtoClient(client net.Conn, cfg *Config, hi *handshakeInfo, secret
 		log.Printf("WARN   [%s] DC%d%s no fallback available", label, hi.DC, mediaTag)
 	}
 
-	if isBlacklisted(hi.DC, hi.IsMedia) {
-		log.Printf("INFO   [%s] DC%d%s WS blacklisted -> fallback", label, hi.DC, mediaTag)
-		doFallback(false, false, false, "")
+	primaryTarget := ""
+	if targets := cfg.DCPool[hi.DC]; len(targets) > 0 {
+		primaryTarget = targets[0]
+	}
+	ws := pool.getForDC(cfg, dcKey{DC: hi.DC, IsMedia: hi.IsMedia})
+	if ws == nil {
+		debugf(cfg, "[%s] DC%d%s WS pool unavailable -> fallback", label, hi.DC, mediaTag)
+		doFallback(primaryTarget)
 		return
 	}
-
-	targets, hasTarget := cfg.DCPool[hi.DC]
-	if !hasTarget || len(targets) == 0 {
-		log.Printf("INFO   [%s] DC%d%s not in config -> fallback", label, hi.DC, mediaTag)
-		doFallback(false, false, false, "")
-		return
-	}
-	primaryTarget := targets[0]
-	hasAnyCFFallback := cfg.hasCFProxyWorkerDomains() || (cfg.FallbackCFProxy && cfg.hasCFProxyDomains())
-	directTargets, frontingTargets := splitWSTargets(targets, hasAnyCFFallback)
-	wsTarget := primaryTarget
-	if len(directTargets) > 0 {
-		wsTarget = directTargets[0]
-	}
-
-	dcW := hi.DC
-	if v, ok := dcOverrides[dcW]; ok {
-		dcW = v
-	}
-	domains := wsDomains(dcW, hi.IsMedia)
-	key := dcKey{DC: hi.DC, IsMedia: hi.IsMedia}
-	connectWS := func(timeout time.Duration) (*websocket.Conn, string, bool, bool, bool) {
-		wsFailedRedirect := false
-		allRedirect := true
-		tryFronting := false
-		for _, target := range directTargets {
-			for _, d := range domains {
-				debugf(cfg, "[%s] DC%d%s -> wss://%s/apiws via %s", label, hi.DC, mediaTag, d, target)
-				conn, resp, err := dialWS(target, d, timeout)
-				if err == nil {
-					allRedirect = false
-					return conn, target, wsFailedRedirect, allRedirect, tryFronting
-				}
-				atomic.AddInt64(&stats.wsErrors, 1)
-				if resp != nil && isRedirect(resp.StatusCode) {
-					wsFailedRedirect = true
-					warnf("[%s] DC%d%s got %d from %s via %s", label, hi.DC, mediaTag, resp.StatusCode, d, target)
-					continue
-				}
-				if isTimeoutError(err) {
-					tryFronting = true
-					allRedirect = false
-					if hasAnyCFFallback {
-						setIPCooldown(target)
-					}
-					warnf("[%s] DC%d%s WS connect timed out via %s", label, hi.DC, mediaTag, target)
-					break
-				}
-				allRedirect = false
-				warnf("[%s] DC%d%s WS connect failed via %s: %v", label, hi.DC, mediaTag, target, err)
-				if isFrontingRetryError(err) {
-					tryFronting = true
-					break
-				}
-			}
-		}
-		return nil, "", wsFailedRedirect, allRedirect, tryFronting
-	}
-
-	connectFronting := func(reason string) (*websocket.Conn, string) {
-		for _, target := range frontingTargets {
-			log.Printf("INFO   [%s] DC%d%s -> fronting %s via %s", label, hi.DC, mediaTag, reason, target)
-			conn, _, err := wsConnectFronting(target, domains, wsConnectTimeout)
-			if err == nil {
-				setFrontingActive()
-				atomic.AddInt64(&stats.connectionsFront, 1)
-				log.Printf("INFO   [%s] DC%d%s fronting OK for %ds", label, hi.DC, mediaTag, int(frontingCooldown.Seconds()))
-				return conn, target
-			}
-			atomic.AddInt64(&stats.wsErrors, 1)
-			warnf("[%s] DC%d%s fronting failed via %s: %v", label, hi.DC, mediaTag, target, err)
-		}
-		return nil, ""
-	}
-
-	dialFresh := func() (*websocket.Conn, string, bool) {
-		if frontingActive() {
-			if conn, target := connectFronting("active"); conn != nil {
-				return conn, target, false
-			}
-			clearFrontingActive()
-		}
-		if len(directTargets) == 0 {
-			log.Printf("INFO   [%s] DC%d%s WS target IPs are timed out -> fallback", label, hi.DC, mediaTag)
-			doFallback(false, false, false, primaryTarget)
-			return nil, "", false
-		}
-		timeout := wsConnectTimeout
-		if inCooldown(key) {
-			timeout = wsConnectCooldownTimeout
-		}
-		conn, target, wsFailedRedirect, allRedirect, tryFronting := connectWS(timeout)
-		if conn == nil {
-			if tryFronting {
-				if conn, target := connectFronting("fallback"); conn != nil {
-					return conn, target, false
-				}
-			}
-			doFallback(true, wsFailedRedirect, allRedirect, primaryTarget)
-		}
-		return conn, target, conn != nil
-	}
-
-	ws := pool.get(cfg, key, wsTarget, domains)
-	usedTarget := wsTarget
-	directWS := false
-	fromPool := ws != nil
-	if fromPool {
-		log.Printf("INFO   [%s] DC%d%s -> pool hit via %s", label, hi.DC, mediaTag, wsTarget)
-	} else {
-		ws, usedTarget, directWS = dialFresh()
-		if ws == nil {
-			return
-		}
-	}
-
-	var splitter *msgSplitter
-	if ms, err := newMsgSplitter(relayInit, protoInt); err == nil {
-		splitter = ms
-	}
-
-	if err := writeWSBinary(ws, relayInit); err != nil {
-		warnf("[%s] ws init write failed: %v", label, err)
+	stop := context.AfterFunc(cfg.context(), func() { _ = ws.Close() })
+	err = writeWSBinary(ws, relayInit)
+	stop()
+	if err != nil {
+		warnf("[%s] pooled WS init write failed: %v", label, err)
 		_ = ws.Close()
-		if !fromPool {
-			setCooldown(key)
-			doFallback(false, false, false, primaryTarget)
-			return
-		}
-		ws, usedTarget, directWS = dialFresh()
-		if ws == nil {
-			return
-		}
-		if err := writeWSBinary(ws, relayInit); err != nil {
-			warnf("[%s] ws init write failed after pool retry: %v", label, err)
-			_ = ws.Close()
-			setCooldown(key)
-			doFallback(false, false, false, primaryTarget)
-			return
-		}
-	}
-
-	clearCooldown(key)
-	if directWS {
-		clearIPCooldown(usedTarget)
+		doFallback(primaryTarget)
+		return
 	}
 	atomic.AddInt64(&stats.connectionsWS, 1)
-
-	bridgeWS(label, cfg, hi.DC, hi.IsMedia, client, ws, cltDec, cltEnc, tgEnc, tgDec, splitter)
+	bridgeWS(label, cfg, hi.DC, hi.IsMedia, client, ws, cltDec, cltEnc, tgEnc, tgDec, newFallbackSplitter())
 }
