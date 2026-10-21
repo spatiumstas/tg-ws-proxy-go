@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -20,7 +21,12 @@ type wsPoolKey struct {
 }
 
 type wsPool struct {
+	closeOnce sync.Once
 	mu        sync.Mutex
+	ctx       context.Context
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
+	closed    bool
 	idle      map[wsPoolKey][]pooledWS
 	refilling map[wsPoolKey]bool
 	routes    map[wsPoolKey]poolRoute
@@ -38,7 +44,9 @@ var (
 )
 
 func newWSPool() *wsPool {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &wsPool{
+		ctx: ctx, cancel: cancel,
 		idle:      make(map[wsPoolKey][]pooledWS),
 		refilling: make(map[wsPoolKey]bool),
 		routes:    make(map[wsPoolKey]poolRoute),
@@ -50,6 +58,10 @@ func (p *wsPool) get(cfg *Config, key dcKey, targetIP string, domains []string) 
 	now := time.Now()
 	for {
 		p.mu.Lock()
+		if p.closed {
+			p.mu.Unlock()
+			return nil
+		}
 		bucket := p.idle[poolKey]
 		if len(bucket) == 0 {
 			p.scheduleRefill(cfg, poolKey, domains)
@@ -72,7 +84,7 @@ func (p *wsPool) get(cfg *Config, key dcKey, targetIP string, domains []string) 
 }
 
 func (p *wsPool) scheduleRefill(cfg *Config, key wsPoolKey, domains []string) {
-	if cfg.PoolSize <= 0 {
+	if p.closed || cfg.PoolSize <= 0 {
 		return
 	}
 	route, known := p.routes[key]
@@ -80,12 +92,12 @@ func (p *wsPool) scheduleRefill(cfg *Config, key wsPoolKey, domains []string) {
 		route.domains = append([]string(nil), domains...)
 		p.routes[key] = route
 	}
-	if p.refilling[key] || len(p.idle[key]) >= cfg.PoolSize || time.Now().Before(route.retryAfter) ||
-		isBlacklisted(key.DC, key.IsMedia) || (inIPCooldown(key.TargetIP) && !frontingActive()) {
+	if p.refilling[key] || len(p.idle[key]) >= cfg.PoolSize || time.Now().Before(route.retryAfter) {
 		return
 	}
 	p.refilling[key] = true
-	go p.refill(cfg, key, domains)
+	p.wg.Add(1)
+	go func() { defer p.wg.Done(); p.refill(cfg, key, domains) }()
 }
 
 func (p *wsPool) rotate(cfg *Config) {
@@ -125,22 +137,24 @@ func (p *wsPool) refill(cfg *Config, key wsPoolKey, domains []string) {
 	for {
 		p.mu.Lock()
 		cur := len(p.idle[key])
+		closed := p.closed
 		p.mu.Unlock()
-		if cur >= cfg.PoolSize {
+		if closed || cur >= cfg.PoolSize {
 			return
 		}
 		useFronting := frontingActive()
-		if isBlacklisted(key.DC, key.IsMedia) || (inIPCooldown(key.TargetIP) && !useFronting) {
-			return
-		}
 		connect := poolWSConnect
 		if useFronting {
 			connect = poolWSConnectFronting
 		}
-		conn, _, err := connect(key.TargetIP, domains, poolConnectTimeout)
-		if err != nil && !useFronting && isFrontingRetryError(err) {
+		conn, _, err := connect(p.ctx, key.TargetIP, domains, poolConnectTimeout)
+		if err != nil && useFronting && p.ctx.Err() == nil {
+			clearFrontingActive()
+			useFronting = false
+			conn, _, err = poolWSConnect(p.ctx, key.TargetIP, domains, poolConnectTimeout)
+		} else if err != nil && !useFronting && isFrontingRetryError(err) && p.ctx.Err() == nil {
 			useFronting = true
-			conn, _, err = poolWSConnectFronting(key.TargetIP, domains, poolConnectTimeout)
+			conn, _, err = poolWSConnectFronting(p.ctx, key.TargetIP, domains, poolConnectTimeout)
 			if err == nil {
 				setFrontingActive()
 				atomic.AddInt64(&stats.connectionsFront, 1)
@@ -148,6 +162,10 @@ func (p *wsPool) refill(cfg *Config, key wsPoolKey, domains []string) {
 		}
 		if err != nil {
 			p.mu.Lock()
+			if p.closed {
+				p.mu.Unlock()
+				return
+			}
 			route := p.routes[key]
 			route.domains = domains
 			route.retryDelay = min(max(route.retryDelay*2, wsPoolBackoffMin), wsPoolBackoffMax)
@@ -159,7 +177,7 @@ func (p *wsPool) refill(cfg *Config, key wsPoolKey, domains []string) {
 			return
 		}
 		p.mu.Lock()
-		if isBlacklisted(key.DC, key.IsMedia) || (inIPCooldown(key.TargetIP) && !useFronting) {
+		if p.closed {
 			p.mu.Unlock()
 			_ = conn.Close()
 			return
@@ -170,52 +188,73 @@ func (p *wsPool) refill(cfg *Config, key wsPoolKey, domains []string) {
 	}
 }
 
-func (p *wsPool) discardTarget(targetIP string) {
-	if targetIP == "" {
-		return
+func (p *wsPool) getForDC(cfg *Config, key dcKey) *websocket.Conn {
+	if cfg.PoolSize <= 0 {
+		return nil
 	}
-	var stale []pooledWS
-	p.mu.Lock()
-	for key, bucket := range p.idle {
-		if key.TargetIP != targetIP {
-			continue
+	dc := key.DC
+	if mapped, ok := dcOverrides[dc]; ok {
+		dc = mapped
+	}
+	domains := wsDomains(dc, key.IsMedia)
+	for _, ip := range cfg.DCPool[key.DC] {
+		if ws := p.get(cfg, key, ip, domains); ws != nil {
+			return ws
 		}
-		stale = append(stale, bucket...)
-		delete(p.idle, key)
 	}
-	p.mu.Unlock()
-	for _, item := range stale {
-		_ = item.Conn.Close()
-	}
+	return nil
 }
 
-func warmupPool(cfg *Config) {
+func (p *wsPool) warmup(cfg *Config) {
 	if cfg.PoolSize <= 0 {
 		return
 	}
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return
+	}
 	for dc, targets := range cfg.DCPool {
-		if len(targets) == 0 {
-			continue
+		dcw := dc
+		if mapped, ok := dcOverrides[dc]; ok {
+			dcw = mapped
 		}
-		ip := targets[0]
-		for _, media := range []bool{false, true} {
-			dcw := dc
-			if v, ok := dcOverrides[dcw]; ok {
-				dcw = v
+		for _, ip := range targets {
+			for _, media := range []bool{false, true} {
+				p.scheduleRefill(cfg, wsPoolKey{DC: dc, IsMedia: media, TargetIP: ip}, wsDomains(dcw, media))
 			}
-			key := wsPoolKey{DC: dc, IsMedia: media, TargetIP: ip}
-			domains := wsDomains(dcw, media)
-			pool.mu.Lock()
-			pool.scheduleRefill(cfg, key, domains)
-			pool.mu.Unlock()
 		}
 	}
-	logf("INFO   WS pool warmup started for %d DC(s)", len(cfg.DCMap))
+	p.wg.Add(1)
+	p.mu.Unlock()
 	go func() {
+		defer p.wg.Done()
 		ticker := time.NewTicker(wsPoolCheckInterval)
 		defer ticker.Stop()
-		for range ticker.C {
-			pool.rotate(cfg)
+		for {
+			select {
+			case <-p.ctx.Done():
+				return
+			case <-ticker.C:
+				p.rotate(cfg)
+			}
 		}
 	}()
+}
+
+func (p *wsPool) Close() {
+	p.closeOnce.Do(func() {
+		p.mu.Lock()
+		p.closed = true
+		p.cancel()
+		idle := p.idle
+		p.idle = make(map[wsPoolKey][]pooledWS)
+		p.mu.Unlock()
+		for _, bucket := range idle {
+			for _, item := range bucket {
+				_ = item.Conn.Close()
+			}
+		}
+		p.wg.Wait()
+	})
 }

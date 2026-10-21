@@ -55,7 +55,7 @@ jobs:
             if (!/^[0-9]+\.[0-9]+(?:\.[0-9]+)?$/.test(version) || !/^[1-9][0-9]*$/.test(revision)) {
               throw new Error('Use version X.Y or X.Y.Z and a positive integer revision');
             }
-            const tag = version;
+            const tag = revision === '1' ? version : `${version}-rev${revision}`;
             try {
               if (await tagCommit(tag) !== context.sha) {
                 throw new Error(`Tag ${tag} points to another commit; select that tag or use a new version/revision`);
@@ -268,4 +268,4 @@ jobs:
             -H "Authorization: token ${{ secrets.AGGREGATOR_PAT }}" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
             https://api.github.com/repos/spatiumstas/feedly/dispatches \
-            -d '{"event_type":"package-built","client_payload":{"package":"'"${{ github.repository }}"'","channel":"release","tag":"'"${{ steps.target-release.outputs.tag }}"'"}}'
+            -d '{"event_type":"package-built","client_payload":{"package":"'"${{ github.repository }}"'","channel":"release","tag":"'"${{ needs.prepare.outputs.tag }}"'"}}'

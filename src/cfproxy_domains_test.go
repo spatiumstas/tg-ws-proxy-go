@@ -1,9 +1,48 @@
 package main
 
 import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestBuiltinDomainPoolIsValid(t *testing.T) {
+	for _, domain := range defaultCFProxyDomains() {
+		if !isValidCFProxyDomain(domain) {
+			t.Fatalf("invalid builtin domain %q", domain)
+		}
+	}
+}
+
+func TestFetchDomainList(t *testing.T) {
+	for _, tc := range []struct {
+		body string
+		ok   bool
+	}{
+		{"# comment\nvirkgj.com\nsecond.co.uk\nthird.co.uk\nsecond.co.uk", true},
+		{"<html>upstream error</html>", false},
+		{"one.co.uk\none.co.uk", false},
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("cb") == "" {
+				t.Error("missing cache buster")
+			}
+			fmt.Fprint(w, tc.body)
+		}))
+		got, err := fetchCFProxyDomains(context.Background(), srv.URL, time.Second)
+		srv.Close()
+		if (err == nil) != tc.ok {
+			t.Fatalf("fetch = %v, %v", got, err)
+		}
+		if tc.ok && (len(got) != 3 || got[0] != "pclead.co.uk") {
+			t.Fatalf("decoded domains %v", got)
+		}
+	}
+}
 
 func TestNormalizeCFProxyDomain(t *testing.T) {
 	cases := map[string]string{

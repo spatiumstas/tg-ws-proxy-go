@@ -16,6 +16,11 @@ func TestGenerateRelayInit(t *testing.T) {
 	if reservedFirst[ri[0]] {
 		t.Error("first byte must not be a reserved value")
 	}
+	for _, prefix := range reservedStart {
+		if bytes.Equal(ri[:4], prefix) {
+			t.Errorf("reserved relay prefix: %x", prefix)
+		}
+	}
 	if bytes.Equal(ri[4:8], []byte{0, 0, 0, 0}) {
 		t.Error("bytes [4:8] must not be all-zero")
 	}

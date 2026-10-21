@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -8,6 +9,7 @@ import (
 )
 
 type Config struct {
+	ctx                          context.Context
 	Host                         string
 	Port                         int
 	SecretHex                    string
@@ -40,6 +42,13 @@ type Config struct {
 	fallbackDials                map[fallbackDialKey]int
 }
 
+func (cfg *Config) context() context.Context {
+	if cfg.ctx != nil {
+		return cfg.ctx
+	}
+	return context.Background()
+}
+
 type fallbackDialKey struct {
 	domain string
 	worker bool
@@ -58,6 +67,8 @@ type Stats struct {
 	bytesDown         int64
 	poolHits          int64
 	poolMisses        int64
+	workerPoolHits    int64
+	workerPoolMisses  int64
 }
 
 func (s *Stats) summary() string {
@@ -69,7 +80,7 @@ func (s *Stats) summary() string {
 		poolS = fmt.Sprintf("%d/%d", hits, poolTotal)
 	}
 	return fmt.Sprintf(
-		"total=%d active=%d ws=%d tcp_fb=%d cf=%d front=%d bad=%d err=%d pool=%s up=%s down=%s",
+		"total=%d active=%d ws=%d tcp_fb=%d cf=%d front=%d bad=%d err=%d pool=%s up=%s down=%s worker_pool=%d/%d",
 		atomic.LoadInt64(&s.connectionsTotal),
 		atomic.LoadInt64(&s.connectionsActive),
 		atomic.LoadInt64(&s.connectionsWS),
@@ -81,6 +92,8 @@ func (s *Stats) summary() string {
 		poolS,
 		humanBytes(atomic.LoadInt64(&s.bytesUp)),
 		humanBytes(atomic.LoadInt64(&s.bytesDown)),
+		atomic.LoadInt64(&s.workerPoolHits),
+		atomic.LoadInt64(&s.workerPoolHits)+atomic.LoadInt64(&s.workerPoolMisses),
 	)
 }
 

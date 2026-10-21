@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -174,7 +175,7 @@ func decodeCFProxyDomain(raw string) string {
 	return string(decoded) + ".co.uk"
 }
 
-func fetchCFProxyDomains(url string, timeout time.Duration) ([]string, error) {
+func fetchCFProxyDomains(ctx context.Context, url string, timeout time.Duration) ([]string, error) {
 	trimmedURL := strings.TrimSpace(url)
 	if trimmedURL == "" {
 		return nil, fmt.Errorf("empty cfproxy domains url")
@@ -185,7 +186,7 @@ func fetchCFProxyDomains(url string, timeout time.Duration) ([]string, error) {
 	}
 
 	client := &http.Client{Timeout: timeout}
-	req, err := http.NewRequest(http.MethodGet, fetchURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fetchURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -239,15 +240,18 @@ func cacheBustURL(raw string) (string, error) {
 	return u.String(), nil
 }
 
-func startCFProxyDomainRefresh(cfg *Config) {
+func startCFProxyDomainRefresh(ctx context.Context, cfg *Config) <-chan struct{} {
+	done := make(chan struct{})
 	if cfg == nil || !cfg.FallbackCFProxy || !cfg.FallbackCFProxyRefresh || cfg.FallbackCFProxyUserDomain || strings.TrimSpace(cfg.FallbackCFProxyDomainsURL) == "" {
-		return
+		close(done)
+		return done
 	}
 	log.Printf("INFO   CF proxy domain refresh scheduled: url=%s interval=%s", cfg.FallbackCFProxyDomainsURL, defaultCFProxyRefreshInterval)
 
 	go func() {
+		defer close(done)
 		refresh := func() {
-			domains, err := fetchCFProxyDomains(cfg.FallbackCFProxyDomainsURL, defaultCFProxyRefreshTimeout)
+			domains, err := fetchCFProxyDomains(ctx, cfg.FallbackCFProxyDomainsURL, defaultCFProxyRefreshTimeout)
 			if err != nil {
 				log.Printf("WARN   CF proxy domain refresh failed: %v", err)
 				return
@@ -259,10 +263,16 @@ func startCFProxyDomainRefresh(cfg *Config) {
 		refresh()
 		ticker := time.NewTicker(defaultCFProxyRefreshInterval)
 		defer ticker.Stop()
-		for range ticker.C {
-			refresh()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				refresh()
+			}
 		}
 	}()
+	return done
 }
 
 func (cfg *Config) hasCFProxyDomains() bool {
@@ -364,6 +374,9 @@ func (cfg *Config) finishFallbackDial(domain string, worker bool, err error) boo
 	failures := &cfg.cfproxyFailUntil
 	if worker {
 		failures = &cfg.cfworkerFailUntil
+	}
+	if errors.Is(err, context.Canceled) {
+		return false
 	}
 	if err == nil {
 		delete(*failures, domain)

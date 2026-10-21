@@ -19,15 +19,11 @@ const (
 	wsPoolCheckInterval                  = 5 * time.Second
 	wsPoolBackoffMin                     = 5 * time.Second
 	wsPoolBackoffMax                     = time.Minute
-	ipFailCooldown                       = time.Hour
-	dcFailCooldown                       = 60 * time.Second
 	frontingCooldown                     = 30 * time.Minute
-	dcBlacklistTTL                       = 10 * time.Minute
 	ioIdleTimeout                        = 5 * time.Minute
 	idleWatchdogCheckInterval            = 5 * time.Second
 	wsWriteTimeout                       = 15 * time.Second
 	wsConnectTimeout                     = 5 * time.Second
-	wsConnectCooldownTimeout             = 2 * time.Second
 	poolConnectTimeout                   = 8 * time.Second
 	clientHandshakeTimeout               = 10 * time.Second
 	tcpDialTimeout                       = 10 * time.Second
@@ -41,6 +37,7 @@ const (
 	acceptBackoffMax                     = 1 * time.Second
 	defaultMaxConns                      = 256
 	defaultCFProxyDomain                 = "pclead.co.uk"
+	defaultCFProxyDomainsURL             = "https://raw.githubusercontent.com/Flowseal/tg-ws-proxy/main/.github/cfproxy-domains.txt"
 	defaultCFProxyRefreshTimeout         = 10 * time.Second
 	defaultCFProxyRefreshInterval        = 1 * time.Hour
 	defaultCFProxyRefreshMinValidDomains = 3
@@ -60,6 +57,7 @@ var (
 		[]byte("HEAD"),
 		[]byte("POST"),
 		[]byte("GET "),
+		[]byte("OPTI"),
 		{0xee, 0xee, 0xee, 0xee},
 		{0xdd, 0xdd, 0xdd, 0xdd},
 		{0x16, 0x03, 0x01, 0x02},
@@ -77,7 +75,10 @@ var (
 	dcOverrides = map[int]int{203: 2}
 
 	cfProxyDefaultDomainPool = []string{
-		defaultCFProxyDomain,
+		"virkgj.com", "vmmzovy.com", "mkuosckvso.com", "zaewayzmplad.com", "twdmbzcm.com",
+		"awzwsldi.com", "clngqrflngqin.com", "tjacxbqtj.com", "bxaxtxmrw.com", "dmohrsgmohcrwb.com",
+		"vwbmtmoi.com", "khgrre.com", "ulihssf.com", "tmhqsdqmfpmk.com", "xwuwoqbm.com",
+		"orgcnunpj.com", "zhkuldz.com", "zypoljnslxa.com", "efabnxaowuzs.com", "zaftuzsftqdq.com",
 	}
 
 	cfProxyKnownDCs = []int{1, 2, 3, 4, 5, 203}
