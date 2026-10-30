@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"strings"
 )
 
 var upstreamSessionCache = tls.NewLRUClientSessionCache(256)
@@ -21,9 +22,16 @@ func upstreamTLSConfig(serverName string, verifyName string) *tls.Config {
 			for _, cert := range cs.PeerCertificates[1:] {
 				intermediates.AddCert(cert)
 			}
-			_, err := cs.PeerCertificates[0].Verify(x509.VerifyOptions{
+			opts := x509.VerifyOptions{
 				Roots: cfg.RootCAs, Intermediates: intermediates, DNSName: verifyName,
-			})
+			}
+			_, err := cs.PeerCertificates[0].Verify(opts)
+			var nameErr x509.HostnameError
+			if errors.As(err, &nameErr) && serverName == "sprinthost.ru" && strings.HasSuffix(verifyName, ".web.telegram.org") {
+				// Telegram's fronted endpoint may return its main-site certificate.
+				opts.DNSName = "telegram.org"
+				_, err = cs.PeerCertificates[0].Verify(opts)
+			}
 			return err
 		}
 	}

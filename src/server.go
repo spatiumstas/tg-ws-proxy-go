@@ -40,14 +40,27 @@ func main() {
 
 	initLogger(cfg)
 	checkFDLimit(cfg)
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	cfg.ctx = ctx
+	// Probe before listening so a masking domain pointing here cannot answer itself.
+	if cfg.FakeTLSDomain != "" {
+		length, err := probeFakeTLSAppDataLen(ctx, net.JoinHostPort(cfg.FakeTLSDomain, "443"), cfg.FakeTLSDomain)
+		if err != nil {
+			log.Printf("WARN   Fake TLS profile unavailable: %v; using random record sizes", err)
+		} else {
+			cfg.fakeTLSAppDataLen = length
+			log.Printf("INFO   Fake TLS profile: first encrypted record %d bytes", length)
+		}
+	}
+	if ctx.Err() != nil {
+		return
+	}
 	ln, err := net.Listen("tcp", net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port)))
 	if err != nil {
 		log.Fatalf("listen error: %v", err)
 	}
 	defer ln.Close()
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-	cfg.ctx = ctx
 	pprofDone := startPprof(ctx, cfg)
 	refreshDone := startCFProxyDomainRefresh(ctx, cfg)
 
@@ -193,7 +206,7 @@ func handleClient(client net.Conn, cfg *Config, secret []byte) {
 
 	handshakeConn := client
 	if cfg.FakeTLSDomain != "" {
-		fconn, hs, ok := acceptFakeTLSClient(cfg.context(), client, secret, cfg.FakeTLSDomain, label)
+		fconn, hs, ok := acceptFakeTLSClient(cfg.context(), client, secret, cfg.FakeTLSDomain, cfg.fakeTLSAppDataLen, label)
 		if !ok {
 			return
 		}

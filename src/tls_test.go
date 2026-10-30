@@ -31,25 +31,32 @@ func TestUpstreamTLSVerification(t *testing.T) {
 	roots := x509.NewCertPool()
 	roots.AddCert(root)
 	for _, tc := range []struct {
-		name, host                         string
-		fronting, trusted, expired, wantOK bool
+		name, host, verifyName, certName string
+		trusted, expired, wantOK         bool
 	}{
-		{"direct", "upstream.test", false, true, false, true},
-		{"wrong name", "other.test", false, true, false, false},
-		{"unknown CA", "upstream.test", false, false, false, false},
-		{"expired", "upstream.test", false, true, true, false},
-		{"fronting", "sprinthost.ru", true, true, false, true},
-		{"fronting unknown CA", "sprinthost.ru", true, false, false, false},
-		{"fronting wrong name", "sprinthost.ru", true, true, false, false},
-		{"fronting expired", "sprinthost.ru", true, true, true, false},
+		{"direct", "upstream.test", "upstream.test", "upstream.test", true, false, true},
+		{"wrong name", "other.test", "other.test", "upstream.test", true, false, false},
+		{"unknown CA", "upstream.test", "upstream.test", "upstream.test", false, false, false},
+		{"expired", "upstream.test", "upstream.test", "upstream.test", true, true, false},
+		{"fronting", "sprinthost.ru", "upstream.test", "upstream.test", true, false, true},
+		{"fronting unknown CA", "sprinthost.ru", "upstream.test", "upstream.test", false, false, false},
+		{"fronting wrong name", "sprinthost.ru", "upstream.test", "attacker.test", true, false, false},
+		{"fronting expired", "sprinthost.ru", "upstream.test", "upstream.test", true, true, false},
+		{"telegram fronting", "sprinthost.ru", "kws2.web.telegram.org", "telegram.org", true, false, true},
+		{"telegram media fronting", "sprinthost.ru", "kws4-1.web.telegram.org", "telegram.org", true, false, true},
+		{"telegram fronting exact name", "sprinthost.ru", "kws2.web.telegram.org", "kws2.web.telegram.org", true, false, true},
+		{"telegram fronting unknown CA", "sprinthost.ru", "kws2.web.telegram.org", "telegram.org", false, false, false},
+		{"telegram fronting expired", "sprinthost.ru", "kws2.web.telegram.org", "telegram.org", true, true, false},
+		{"telegram fronting wrong name", "sprinthost.ru", "kws2.web.telegram.org", "attacker.test", true, false, false},
+		{"telegram direct mismatch", "kws2.web.telegram.org", "kws2.web.telegram.org", "telegram.org", true, false, false},
+		{"CF mismatch", "kws2.cf.test", "kws2.cf.test", "telegram.org", true, false, false},
+		{"fronting unrelated target", "sprinthost.ru", "upstream.test", "telegram.org", true, false, false},
+		{"fronting lookalike", "sprinthost.ru", "kws2.web.telegram.org.attacker.test", "telegram.org", true, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			leaf := &x509.Certificate{SerialNumber: big.NewInt(2), DNSNames: []string{"upstream.test"},
+			leaf := &x509.Certificate{SerialNumber: big.NewInt(2), DNSNames: []string{tc.certName},
 				KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 				NotBefore: time.Now().Add(-2 * time.Hour), NotAfter: time.Now().Add(time.Hour)}
-			if tc.name == "fronting wrong name" {
-				leaf.DNSNames = []string{"attacker.test"}
-			}
 			if tc.expired {
 				leaf.NotAfter = time.Now().Add(-time.Hour)
 			}
@@ -72,11 +79,7 @@ func TestUpstreamTLSVerification(t *testing.T) {
 					_ = c.(*tls.Conn).Handshake()
 				}
 			}()
-			verifyName := tc.host
-			if tc.fronting {
-				verifyName = "upstream.test"
-			}
-			cfg := upstreamTLSConfig(tc.host, verifyName)
+			cfg := upstreamTLSConfig(tc.host, tc.verifyName)
 			cfg.RootCAs = x509.NewCertPool()
 			if tc.trusted {
 				cfg.RootCAs = roots

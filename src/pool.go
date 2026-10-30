@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -10,8 +11,54 @@ import (
 )
 
 type pooledWS struct {
-	Conn    *websocket.Conn
-	Created time.Time
+	*websocket.Conn
+	Created    time.Time
+	first      *wsFirstRead
+	firstTaken bool
+}
+
+type wsFirstRead struct {
+	done   chan struct{}
+	typeID int
+	reader io.Reader
+	err    error
+}
+
+func newPooledWS(conn *websocket.Conn) pooledWS {
+	first := &wsFirstRead{done: make(chan struct{})}
+	// Observe close/ping frames while idle, then hand the first data reader to the bridge.
+	go func() {
+		first.typeID, first.reader, first.err = conn.NextReader()
+		close(first.done)
+	}()
+	return pooledWS{Conn: conn, Created: time.Now(), first: first}
+}
+
+func (ws *pooledWS) stale(now time.Time) bool {
+	if now.Sub(ws.Created) >= wsPoolMaxAge {
+		return true
+	}
+	select {
+	case <-ws.first.done:
+		return ws.first.err != nil
+	default:
+	}
+	return false
+}
+
+func (ws *pooledWS) NextReader() (int, io.Reader, error) {
+	if !ws.firstTaken {
+		<-ws.first.done
+		ws.firstTaken = true
+		return ws.first.typeID, ws.first.reader, ws.first.err
+	}
+	return ws.Conn.NextReader()
+}
+
+func (ws *pooledWS) Close() error {
+	err := ws.Conn.Close()
+	<-ws.first.done
+	return err
 }
 
 type wsPoolKey struct {
@@ -53,7 +100,7 @@ func newWSPool() *wsPool {
 	}
 }
 
-func (p *wsPool) get(cfg *Config, key dcKey, targetIP string, domains []string) *websocket.Conn {
+func (p *wsPool) get(cfg *Config, key dcKey, targetIP string, domains []string) *pooledWS {
 	poolKey := wsPoolKey{DC: key.DC, IsMedia: key.IsMedia, TargetIP: targetIP}
 	now := time.Now()
 	for {
@@ -74,12 +121,12 @@ func (p *wsPool) get(cfg *Config, key dcKey, targetIP string, domains []string) 
 		p.scheduleRefill(cfg, poolKey, domains)
 		p.mu.Unlock()
 
-		if now.Sub(item.Created) > wsPoolMaxAge {
-			_ = item.Conn.Close()
+		if item.stale(now) {
+			_ = item.Close()
 			continue
 		}
 		atomic.AddInt64(&stats.poolHits, 1)
-		return item.Conn
+		return &item
 	}
 }
 
@@ -108,7 +155,7 @@ func (p *wsPool) rotate(cfg *Config) {
 		bucket := p.idle[key]
 		ready := bucket[:0]
 		for _, item := range bucket {
-			if now.Sub(item.Created) >= wsPoolMaxAge {
+			if item.stale(now) {
 				expired = append(expired, item)
 			} else {
 				ready = append(ready, item)
@@ -120,10 +167,10 @@ func (p *wsPool) rotate(cfg *Config) {
 	}
 	p.mu.Unlock()
 	for _, item := range expired {
-		_ = item.Conn.Close()
+		_ = item.Close()
 	}
 	if len(expired) > 0 {
-		debugf(cfg, "WS pool rotated: %d expired", len(expired))
+		debugf(cfg, "WS pool rotated: %d stale", len(expired))
 	}
 }
 
@@ -142,22 +189,35 @@ func (p *wsPool) refill(cfg *Config, key wsPoolKey, domains []string) {
 		if closed || cur >= cfg.PoolSize {
 			return
 		}
-		useFronting := frontingActive()
-		connect := poolWSConnect
-		if useFronting {
-			connect = poolWSConnectFronting
-		}
-		conn, _, err := connect(p.ctx, key.TargetIP, domains, poolConnectTimeout)
-		if err != nil && useFronting && p.ctx.Err() == nil {
-			clearFrontingActive()
-			useFronting = false
-			conn, _, err = poolWSConnect(p.ctx, key.TargetIP, domains, poolConnectTimeout)
-		} else if err != nil && !useFronting && isFrontingRetryError(err) && p.ctx.Err() == nil {
-			useFronting = true
-			conn, _, err = poolWSConnectFronting(p.ctx, key.TargetIP, domains, poolConnectTimeout)
-			if err == nil {
-				setFrontingActive()
-				atomic.AddInt64(&stats.connectionsFront, 1)
+		var conn *websocket.Conn
+		err := errNoDomains
+	connected:
+		for _, domain := range domains {
+			frontedFirst := frontingActive()
+			for _, fronted := range []bool{frontedFirst, !frontedFirst} {
+				if p.ctx.Err() != nil {
+					return
+				}
+				connect := poolWSConnect
+				if fronted {
+					connect = poolWSConnectFronting
+				}
+				conn, _, err = connect(p.ctx, key.TargetIP, []string{domain}, poolConnectTimeout)
+				if err != nil {
+					if p.ctx.Err() != nil {
+						return
+					}
+					atomic.AddInt64(&stats.wsErrors, 1)
+					debugf(cfg, "WS pool connect %s via %s (fronting=%t) failed: %v", domain, key.TargetIP, fronted, err)
+					continue
+				}
+				if fronted {
+					setFrontingActive()
+					atomic.AddInt64(&stats.connectionsFront, 1)
+				} else {
+					clearFrontingActive()
+				}
+				break connected
 			}
 		}
 		if err != nil {
@@ -182,13 +242,13 @@ func (p *wsPool) refill(cfg *Config, key wsPoolKey, domains []string) {
 			_ = conn.Close()
 			return
 		}
-		p.idle[key] = append(p.idle[key], pooledWS{Conn: conn, Created: time.Now()})
+		p.idle[key] = append(p.idle[key], newPooledWS(conn))
 		p.routes[key] = poolRoute{domains: domains}
 		p.mu.Unlock()
 	}
 }
 
-func (p *wsPool) getForDC(cfg *Config, key dcKey) *websocket.Conn {
+func (p *wsPool) getForDC(cfg *Config, key dcKey) *pooledWS {
 	if cfg.PoolSize <= 0 {
 		return nil
 	}
@@ -252,7 +312,7 @@ func (p *wsPool) Close() {
 		p.mu.Unlock()
 		for _, bucket := range idle {
 			for _, item := range bucket {
-				_ = item.Conn.Close()
+				_ = item.Close()
 			}
 		}
 		p.wg.Wait()

@@ -38,7 +38,7 @@ func TestPoolFallbackDoesNotWaitForDirectDial(t *testing.T) {
 				conn, cleanup := dialTestWS(t)
 				defer cleanup()
 				_ = conn.Close()
-				p.idle[wsPoolKey{DC: 99, TargetIP: "192.0.2.99"}] = []pooledWS{{Conn: conn, Created: time.Now()}}
+				p.idle[wsPoolKey{DC: 99, TargetIP: "192.0.2.99"}] = []pooledWS{newPooledWS(conn)}
 			}
 			hi := &handshakeInfo{DC: 99, ProtoTag: protoTagIntermediate, ClientDecI: make([]byte, prekeyLen+ivLen)}
 			done := make(chan struct{})

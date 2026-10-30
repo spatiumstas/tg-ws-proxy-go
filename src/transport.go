@@ -22,6 +22,14 @@ var ioBufPool = sync.Pool{
 	},
 }
 
+type wsConn interface {
+	NextReader() (int, io.Reader, error)
+	WriteMessage(int, []byte) error
+	SetWriteDeadline(time.Time) error
+	RemoteAddr() net.Addr
+	Close() error
+}
+
 func dialWebSocket(ctx context.Context, dialer *websocket.Dialer, endpoint string, headers http.Header) (*websocket.Conn, *http.Response, error) {
 	// Gorilla's HTTP upgrade read has a deadline but does not observe cancellation.
 	netDial := dialer.NetDialContext
@@ -65,7 +73,7 @@ func dialWSWithSNI(ctx context.Context, targetIP, domain, sni string, timeout ti
 	return dialWebSocket(ctx, &dialer, u.String(), headers)
 }
 
-func writeWSBinary(ws *websocket.Conn, data []byte) error {
+func writeWSBinary(ws wsConn, data []byte) error {
 	if err := ws.SetWriteDeadline(time.Now().Add(wsWriteTimeout)); err != nil {
 		return err
 	}
@@ -112,7 +120,7 @@ func startIdleWatchdog(lastActivity *atomic.Int64, stop <-chan struct{}, onIdle 
 	return done
 }
 
-func bridgeWS(label string, cfg *Config, dc int, isMedia bool, client net.Conn, ws *websocket.Conn, cltDec, cltEnc, tgEnc, tgDec cipher.Stream, splitter *msgSplitter) {
+func bridgeWS(label string, cfg *Config, dc int, isMedia bool, client net.Conn, ws wsConn, cltDec, cltEnc, tgEnc, tgDec cipher.Stream, splitter *msgSplitter) {
 	stop := context.AfterFunc(cfg.context(), func() { _ = ws.Close(); _ = client.Close() })
 	defer stop()
 	mediaTag := ""

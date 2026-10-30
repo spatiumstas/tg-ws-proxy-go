@@ -53,7 +53,7 @@ SECRET=
 2. `DC_IP_DEFAULT` и `DC_IP_DEFAULT_POOL` — глобальные значения по умолчанию для DC (`2,4`).
 3. `EXTRA_ARGS` используется для переопределений по DC и дополнительных флагов, см. [CFProxy](https://github.com/Flowseal/tg-ws-proxy/blob/main/docs/CfProxy.md).
 4. Полный список доступных команд: `--help`.
-5. `FAKE_TLS_DOMAIN` включает режим Fake TLS (`ee` secret link). Оставьте пустым для стандартного режима `dd`.
+5. `FAKE_TLS_DOMAIN` включает режим Fake TLS (`ee` secret link). Оставьте пустым для стандартного режима `dd`. Перед запуском приёма соединений прокси измеряет размер первой зашифрованной TLS-записи этого домена на порту 443 (таймаут 5 секунд). Если профиль недоступен, используются случайные размеры 64–160 байт.
 6. `CFPROXY_DOMAINS` — локальный список fallback-доменов.
 7. `CFPROXY_DOMAINS_URL` — [значение по умолчанию](https://raw.githubusercontent.com/Flowseal/tg-ws-proxy/main/.github/cfproxy-domains.txt)/[зеркало](https://raw.githubusercontent.com/spatiumstas/tg-ws-proxy-go/main-go/.github/cfproxy-domains.txt)
 

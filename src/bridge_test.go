@@ -20,11 +20,12 @@ const (
 )
 
 func TestBridgeWSByteIntegrity(t *testing.T) {
-	t.Run("packets", func(t *testing.T) { testBridgeWSByteIntegrity(t, &msgSplitter{proto: protoIntermediateInt}) })
-	t.Run("tunnel", func(t *testing.T) { testBridgeWSByteIntegrity(t, nil) })
+	t.Run("packets", func(t *testing.T) { testBridgeWSByteIntegrity(t, &msgSplitter{proto: protoIntermediateInt}, false) })
+	t.Run("tunnel", func(t *testing.T) { testBridgeWSByteIntegrity(t, nil, false) })
+	t.Run("pooled", func(t *testing.T) { testBridgeWSByteIntegrity(t, &msgSplitter{proto: protoIntermediateInt}, true) })
 }
 
-func testBridgeWSByteIntegrity(t *testing.T, splitter *msgSplitter) {
+func testBridgeWSByteIntegrity(t *testing.T, splitter *msgSplitter, pooled bool) {
 	secret := make([]byte, 16)
 	clientDecI := make([]byte, prekeyLen+ivLen)
 	relayInit := make([]byte, handshakeLen)
@@ -39,6 +40,9 @@ func testBridgeWSByteIntegrity(t *testing.T, splitter *msgSplitter) {
 
 	upPlain := buildIntermediate(8, 12, 100000)
 	downPlain := []byte("downstream-payload-from-telegram")
+	if pooled {
+		downPlain = bytes.Repeat(downPlain, 4096)
+	}
 	upCh := make(chan []byte, 1)
 
 	upgrader := websocket.Upgrader{Subprotocols: []string{"binary"}}
@@ -63,7 +67,12 @@ func testBridgeWSByteIntegrity(t *testing.T, splitter *msgSplitter) {
 		// Send downstream encrypted so the proxy's tgDec recovers it.
 		c3 := make([]byte, len(downPlain))
 		peerTgDec.XORKeyStream(c3, downPlain)
-		_ = c.WriteMessage(websocket.BinaryMessage, c3)
+		if pooled {
+			_ = c.WriteMessage(websocket.BinaryMessage, c3[:len(c3)/2])
+			_ = c.WriteMessage(websocket.BinaryMessage, c3[len(c3)/2:])
+		} else {
+			_ = c.WriteMessage(websocket.BinaryMessage, c3)
+		}
 		time.Sleep(testDeliverGrace)
 	}))
 	defer srv.Close()
@@ -79,7 +88,12 @@ func testBridgeWSByteIntegrity(t *testing.T, splitter *msgSplitter) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	go bridgeWS("test", &Config{}, 2, false, clientProxy, ws, cltDec, cltEnc, tgEnc, tgDec, splitter)
+	var upstream wsConn = ws
+	if pooled {
+		item := newPooledWS(ws)
+		upstream = &item
+	}
+	go bridgeWS("test", &Config{}, 2, false, clientProxy, upstream, cltDec, cltEnc, tgEnc, tgDec, splitter)
 
 	// Client app sends upstream (encrypted with its send stream == proxy cltDec).
 	c := make([]byte, len(upPlain))

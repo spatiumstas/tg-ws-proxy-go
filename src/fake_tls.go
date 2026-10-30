@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/ecdh"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -20,39 +21,22 @@ const (
 	tlsRecordHandshake = 0x16
 	tlsRecordAppData   = 0x17
 
-	tlsClientRandomOffset = 11
-	tlsClientRandomLen    = 32
-	tlsSessionIDOffset    = 44
-	tlsSessionIDLen       = 32
-	tlsRecordMaxLen       = 16384
-	tlsTimestampTolerance = 120
+	tlsClientRandomOffset  = 11
+	tlsClientRandomLen     = 32
+	tlsSessionIDOffset     = 44
+	tlsSessionIDLen        = 32
+	tlsRecordMaxLen        = 16384
+	tlsTimestampTolerance  = 120
+	tlsGroupX25519         = 0x001d
+	tlsGroupX25519MLKEM768 = 0x11ec
 )
 
-var (
-	fakeTLSCCSFrame            = []byte{0x14, 0x03, 0x03, 0x00, 0x01, 0x01}
-	fakeTLSServerHelloTemplate = []byte{
-		0x16, 0x03, 0x03, 0x00, 0x7a,
-		0x02, 0x00, 0x00, 0x76,
-		0x03, 0x03,
-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-		0x20,
-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-		0x13, 0x01, 0x00,
-		0x00, 0x2e,
-		0x00, 0x33, 0x00, 0x24, 0x00, 0x1d, 0x00, 0x20,
-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-		0x00, 0x2b, 0x00, 0x02, 0x03, 0x04,
-	}
-)
+var fakeTLSCCSFrame = []byte{0x14, 0x03, 0x03, 0x00, 0x01, 0x01}
+
+type fakeTLSClientHelloInfo struct {
+	cipherSuites []uint16
+	keyShares    map[uint16]int
+}
 
 type fakeTLSConn struct {
 	raw     net.Conn
@@ -69,7 +53,7 @@ func fakeTLSConnectLink(host string, port int, secretHex, domain string) string 
 	)
 }
 
-func acceptFakeTLSClient(ctx context.Context, client net.Conn, secret []byte, maskingDomain string, label string) (net.Conn, []byte, bool) {
+func acceptFakeTLSClient(ctx context.Context, client net.Conn, secret []byte, maskingDomain string, appDataLen int, label string) (net.Conn, []byte, bool) {
 	_ = client.SetReadDeadline(time.Now().Add(clientHandshakeTimeout))
 	first := make([]byte, 1)
 	if _, err := io.ReadFull(client, first); err != nil {
@@ -104,10 +88,21 @@ func acceptFakeTLSClient(ctx context.Context, client net.Conn, secret []byte, ma
 		return nil, nil, false
 	}
 
-	serverHello, err := buildFakeTLSServerHello(secret, clientRandom, sessionID)
+	serverHello, err := buildFakeTLSServerHello(secret, clientRandom, sessionID, parseFakeTLSClientHello(clientHello), appDataLen)
 	if err != nil {
 		log.Printf("WARN   [%s] Fake TLS server hello build failed: %v", label, err)
 		return nil, nil, false
+	}
+	delay, err := randomIntInRange(8000, 24000)
+	if err != nil {
+		return nil, nil, false
+	}
+	timer := time.NewTimer(time.Duration(delay) * time.Microsecond)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return nil, nil, false
+	case <-timer.C:
 	}
 	_ = client.SetWriteDeadline(time.Now().Add(clientHandshakeTimeout))
 	if _, err := client.Write(serverHello); err != nil {
@@ -165,20 +160,122 @@ func verifyFakeTLSClientHello(data []byte, secret []byte) ([]byte, []byte, bool)
 	return clientRandom, sessionID, true
 }
 
-func buildFakeTLSServerHello(secret []byte, clientRandom []byte, sessionID []byte) ([]byte, error) {
-	sh := make([]byte, len(fakeTLSServerHelloTemplate))
-	copy(sh, fakeTLSServerHelloTemplate)
-	copy(sh[44:44+tlsSessionIDLen], sessionID)
-
-	pubKey := make([]byte, 32)
-	if _, err := rand.Read(pubKey); err != nil {
-		return nil, err
+func parseFakeTLSClientHello(data []byte) fakeTLSClientHelloInfo {
+	empty := fakeTLSClientHelloInfo{}
+	if len(data) < 44 || data[0] != tlsRecordHandshake || data[5] != 0x01 ||
+		int(binary.BigEndian.Uint16(data[3:5])) != len(data)-5 ||
+		int(data[6])<<16|int(data[7])<<8|int(data[8]) != len(data)-9 {
+		return empty
 	}
-	copy(sh[89:89+32], pubKey)
+	sessionLen := int(data[43])
+	if sessionLen > 32 || 44+sessionLen+2 > len(data) {
+		return empty
+	}
+	data = data[44+sessionLen:]
+	suitesLen := int(binary.BigEndian.Uint16(data[:2]))
+	data = data[2:]
+	if suitesLen == 0 || suitesLen%2 != 0 || suitesLen >= len(data) {
+		return empty
+	}
+	info := fakeTLSClientHelloInfo{keyShares: make(map[uint16]int)}
+	for off := 0; off < suitesLen; off += 2 {
+		info.cipherSuites = append(info.cipherSuites, binary.BigEndian.Uint16(data[off:off+2]))
+	}
+	data = data[suitesLen:]
+	compressionLen := int(data[0])
+	if compressionLen == 0 || 1+compressionLen+2 > len(data) {
+		return empty
+	}
+	data = data[1+compressionLen:]
+	if int(binary.BigEndian.Uint16(data[:2])) != len(data)-2 {
+		return empty
+	}
+	data = data[2:]
+	for len(data) > 0 {
+		if len(data) < 4 {
+			return empty
+		}
+		extType := binary.BigEndian.Uint16(data[:2])
+		extLen := int(binary.BigEndian.Uint16(data[2:4]))
+		data = data[4:]
+		if extLen > len(data) {
+			return empty
+		}
+		ext := data[:extLen]
+		data = data[extLen:]
+		if extType != 0x0033 {
+			continue
+		}
+		if len(ext) < 2 || int(binary.BigEndian.Uint16(ext[:2])) != len(ext)-2 {
+			return empty
+		}
+		for shares := ext[2:]; len(shares) > 0; {
+			if len(shares) < 4 {
+				return empty
+			}
+			group := binary.BigEndian.Uint16(shares[:2])
+			keyLen := int(binary.BigEndian.Uint16(shares[2:4]))
+			shares = shares[4:]
+			if keyLen > len(shares) {
+				return empty
+			}
+			if _, exists := info.keyShares[group]; !exists {
+				info.keyShares[group] = keyLen
+			}
+			shares = shares[keyLen:]
+		}
+	}
+	return info
+}
 
-	encSize, err := randomIntInRange(1900, 2100)
+func buildFakeTLSServerHello(secret []byte, clientRandom []byte, sessionID []byte, info fakeTLSClientHelloInfo, appDataLen int) ([]byte, error) {
+	key, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, err
+	}
+	group := uint16(tlsGroupX25519)
+	keyShare := key.PublicKey().Bytes()
+	if info.keyShares[tlsGroupX25519MLKEM768] == 1216 {
+		group = tlsGroupX25519MLKEM768
+		// Fake TLS clients authenticate the flight but do not derive TLS keys.
+		ciphertext := make([]byte, 1088)
+		if _, err := rand.Read(ciphertext); err != nil {
+			return nil, err
+		}
+		keyShare = append(ciphertext, keyShare...)
+	}
+	cipherSuite := uint16(0x1301)
+selectCipher:
+	for _, preferred := range []uint16{0x1301, 0x1303, 0x1302} {
+		for _, offered := range info.cipherSuites {
+			if offered == preferred {
+				cipherSuite = preferred
+				break selectCipher
+			}
+		}
+	}
+
+	sh := make([]byte, 44)
+	sh[0], sh[1], sh[2], sh[5], sh[9], sh[10] = tlsRecordHandshake, 0x03, 0x03, 0x02, 0x03, 0x03
+	sh[43] = byte(len(sessionID))
+	sh = append(sh, sessionID...)
+	sh = binary.BigEndian.AppendUint16(sh, cipherSuite)
+	sh = append(sh, 0x00)
+	sh = binary.BigEndian.AppendUint16(sh, uint16(14+len(keyShare)))
+	sh = append(sh, 0x00, 0x2b, 0x00, 0x02, 0x03, 0x04, 0x00, 0x33)
+	sh = binary.BigEndian.AppendUint16(sh, uint16(4+len(keyShare)))
+	sh = binary.BigEndian.AppendUint16(sh, group)
+	sh = binary.BigEndian.AppendUint16(sh, uint16(len(keyShare)))
+	sh = append(sh, keyShare...)
+	binary.BigEndian.PutUint16(sh[3:5], uint16(len(sh)-5))
+	binary.BigEndian.PutUint16(sh[7:9], uint16(len(sh)-9))
+
+	encSize := max(64, min(appDataLen, tlsRecordMaxLen))
+	if appDataLen <= 0 {
+		encSize, err = randomIntInRange(64, 160)
+		if err != nil {
+			return nil, err
+		}
 	}
 	encData := make([]byte, encSize)
 	if _, err := rand.Read(encData); err != nil {

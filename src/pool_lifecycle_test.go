@@ -41,9 +41,9 @@ func TestPoolCloseDuringDial(t *testing.T) {
 }
 
 func TestPoolWarmupAllIPsAndDC203(t *testing.T) {
-	old := poolWSConnect
+	old, oldFront := poolWSConnect, poolWSConnectFronting
 	p := newWSPool()
-	defer func() { p.Close(); poolWSConnect = old }()
+	defer func() { p.Close(); poolWSConnect, poolWSConnectFronting = old, oldFront }()
 	type call struct {
 		ip      string
 		domains []string
@@ -51,8 +51,10 @@ func TestPoolWarmupAllIPsAndDC203(t *testing.T) {
 	calls := make(chan call, 4)
 	poolWSConnect = func(ctx context.Context, ip string, domains []string, _ time.Duration) (*websocket.Conn, *http.Response, error) {
 		calls <- call{ip, domains}
-		return nil, nil, errors.New("offline")
+		<-ctx.Done()
+		return nil, nil, ctx.Err()
 	}
+	poolWSConnectFronting = poolWSConnect
 	p.warmup(&Config{PoolSize: 1, DCPool: map[int][]string{203: {"192.0.2.1", "192.0.2.2"}}})
 	seen := map[string]bool{}
 	for i := 0; i < 4; i++ {
@@ -83,13 +85,13 @@ func TestPoolUsesSecondReadyIPAndDisablesDirect(t *testing.T) {
 		p.routes[wsPoolKey{DC: 2, TargetIP: ip}] = poolRoute{retryAfter: time.Now().Add(time.Hour)}
 	}
 	key := wsPoolKey{DC: 2, TargetIP: "192.0.2.2"}
-	p.idle[key] = []pooledWS{{Conn: conn, Created: time.Now()}}
+	p.idle[key] = []pooledWS{newPooledWS(conn)}
 	cfg.PoolSize = 0
 	if p.getForDC(cfg, dcKey{DC: 2}) != nil {
 		t.Fatal("disabled pool returned a connection")
 	}
 	cfg.PoolSize = 1
-	if p.getForDC(cfg, dcKey{DC: 2}) != conn {
+	if got := p.getForDC(cfg, dcKey{DC: 2}); got == nil || got.Conn != conn {
 		t.Fatal("ready second IP was ignored")
 	}
 }

@@ -10,6 +10,7 @@ import (
 
 type Config struct {
 	ctx                          context.Context
+	fakeTLSAppDataLen            int
 	Host                         string
 	Port                         int
 	SecretHex                    string
