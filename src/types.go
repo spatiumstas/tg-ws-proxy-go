@@ -20,6 +20,7 @@ type Config struct {
 	DCMap                        map[int]string
 	DCPool                       map[int][]string
 	FallbackCFProxy              bool
+	NoSecure                     bool
 	FallbackCFProxyPriority      bool
 	FallbackCFProxyDomain        string
 	FallbackCFProxyUserDomain    bool

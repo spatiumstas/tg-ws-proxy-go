@@ -55,7 +55,8 @@ func TestPoolWarmupAllIPsAndDC203(t *testing.T) {
 		return nil, nil, ctx.Err()
 	}
 	poolWSConnectFronting = poolWSConnect
-	p.warmup(&Config{PoolSize: 1, DCPool: map[int][]string{203: {"192.0.2.1", "192.0.2.2"}}})
+	cfg := mustParse(t, "--secret", okSecret, "--pool-size", "1", "--dc-ip-pool", "203:192.0.2.1,192.0.2.2", "--no-dc-ip", "2", "--no-dc-ip", "4")
+	p.warmup(cfg)
 	seen := map[string]bool{}
 	for i := 0; i < 4; i++ {
 		select {
@@ -128,12 +129,15 @@ func TestWorkerPoolBoundAndClose(t *testing.T) {
 			defer func() { p.Close(); workerDial = old }()
 			started, release := make(chan struct{}), make(chan struct{})
 			var calls atomic.Int32
-			workerDial = func(ctx context.Context, domain, dst string, dc int, _ time.Duration) (*websocket.Conn, *http.Response, error) {
+			workerDial = func(ctx context.Context, domain, dst string, dc int, noSecure bool, _ time.Duration) (*websocket.Conn, *http.Response, error) {
 				if calls.Add(1) == 1 {
 					close(started)
 				}
 				if domain != "worker.test" || dst != "192.0.2.5" || dc != 5 {
 					t.Errorf("wrong worker route: %s %s %d", domain, dst, dc)
+				}
+				if !noSecure {
+					t.Error("worker pool did not pass --no-secure")
 				}
 				if late {
 					<-ctx.Done()
@@ -142,7 +146,7 @@ func TestWorkerPoolBoundAndClose(t *testing.T) {
 				}
 				return conn, nil, nil
 			}
-			cfg := &Config{PoolSize: 4, FallbackCFProxyWorkerDomains: []string{"worker.test"}}
+			cfg := &Config{PoolSize: 4, NoSecure: true, FallbackCFProxyWorkerDomains: []string{"worker.test"}}
 			key := workerPoolKey{dc: 5, dst: "192.0.2.5"}
 			var wg sync.WaitGroup
 			for i := 0; i < 32; i++ {

@@ -83,6 +83,37 @@ func TestParseFlagsDCIPDefault(t *testing.T) {
 	}
 }
 
+func TestParseFlagsNoDCIP(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want map[int]string
+	}{
+		{"DC2", []string{"--no-dc-ip", "2"}, map[int]string{4: "149.154.167.220"}},
+		{"all defaults", []string{"--no-dc-ip", "2", "--no-dc-ip", "4"}, map[int]string{}},
+		{"explicit routes", []string{"--no-dc-ip", "203", "--dc-ip", "203:192.0.2.1", "--dc-ip-pool", "203:192.0.2.2,192.0.2.3"}, map[int]string{2: "149.154.167.220", 4: "149.154.167.220"}},
+		{"repeated DC", []string{"--no-dc-ip", "2", "--no-dc-ip", "2"}, map[int]string{4: "149.154.167.220"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := mustParse(t, append([]string{"--secret", okSecret}, tc.args...)...)
+			if len(cfg.DCMap) != len(tc.want) || len(cfg.DCPool) != len(tc.want) {
+				t.Fatalf("DCMap=%v DCPool=%v, want routes %v", cfg.DCMap, cfg.DCPool, tc.want)
+			}
+			for dc, ip := range tc.want {
+				if cfg.DCMap[dc] != ip || len(cfg.DCPool[dc]) != 1 || cfg.DCPool[dc][0] != ip {
+					t.Errorf("DC%d: map=%q pool=%v, want %s", dc, cfg.DCMap[dc], cfg.DCPool[dc], ip)
+				}
+			}
+			if cfg.PoolSize != 4 || !cfg.FallbackCFProxy {
+				t.Error("--no-dc-ip changed pool size or CF fallback")
+			}
+		})
+	}
+	for _, dc := range []string{"", "x", "0", "-2", "2:192.0.2.1"} {
+		wantParseErr(t, "--secret", okSecret, "--no-dc-ip", dc)
+	}
+}
+
 func TestParseFlagsCFProxy(t *testing.T) {
 	wantParseErr(t, "-secret", okSecret, "-cfproxy-domain", "a.tld", "-cfproxy-domains", "b.tld")
 
@@ -108,6 +139,19 @@ func TestParseFlagsWorkerDomains(t *testing.T) {
 		t.Errorf("worker domains = %v", cfg.FallbackCFProxyWorkerDomains)
 	}
 	wantParseErr(t, "-secret", okSecret, "-cfproxy-worker-domain", "not_a_domain")
+}
+
+func TestParseFlagsNoSecure(t *testing.T) {
+	for _, args := range [][]string{nil, {"--no-secure"}, {"--no-secure=false"}} {
+		cfg := mustParse(t, append([]string{"--secret", okSecret}, args...)...)
+		want := len(args) > 0 && args[0] == "--no-secure"
+		if cfg.NoSecure != want {
+			t.Errorf("parseFlags(%v).NoSecure = %t, want %t", args, cfg.NoSecure, want)
+		}
+		if !cfg.FallbackCFProxy || cfg.FakeTLSDomain != "" {
+			t.Error("--no-secure changed CF fallback or Fake TLS settings")
+		}
+	}
 }
 
 func TestParseFlagsFakeTLS(t *testing.T) {

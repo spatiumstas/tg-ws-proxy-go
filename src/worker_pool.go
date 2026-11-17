@@ -124,7 +124,7 @@ func connectWorker(ctx context.Context, cfg *Config, dc int, dst string, relayIn
 		if !cfg.beginFallbackDial(domain, true) {
 			continue
 		}
-		conn, _, err := workerDial(ctx, domain, dst, dc, wsConnectTimeout)
+		conn, _, err := workerDial(ctx, domain, dst, dc, cfg.NoSecure, wsConnectTimeout)
 		if err == nil && relayInit != nil {
 			stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
 			err = writeWSBinary(conn, relayInit)

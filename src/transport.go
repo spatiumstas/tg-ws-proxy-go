@@ -411,8 +411,11 @@ func wsConnectWithDialer(ctx context.Context, targetIP string, domains []string,
 	return nil, lastResp, lastErr
 }
 
-func dialWSByDomain(ctx context.Context, domain string, timeout time.Duration) (*websocket.Conn, *http.Response, error) {
+func dialWSByDomain(ctx context.Context, domain string, noSecure bool, timeout time.Duration) (*websocket.Conn, *http.Response, error) {
 	u := url.URL{Scheme: "wss", Host: domain, Path: "/apiws"}
+	if noSecure {
+		u.Scheme = "ws"
+	}
 	dialer := websocket.Dialer{
 		HandshakeTimeout: timeout,
 		Subprotocols:     []string{"binary"},
@@ -427,11 +430,14 @@ func dialWSByDomain(ctx context.Context, domain string, timeout time.Duration) (
 	return dialWebSocket(ctx, &dialer, u.String(), headers)
 }
 
-func dialWSWorker(ctx context.Context, worker, dst string, dc int, timeout time.Duration) (*websocket.Conn, *http.Response, error) {
+func dialWSWorker(ctx context.Context, worker, dst string, dc int, noSecure bool, timeout time.Duration) (*websocket.Conn, *http.Response, error) {
 	q := url.Values{}
 	q.Set("dst", dst)
 	q.Set("dc", strconv.Itoa(dc))
 	u := url.URL{Scheme: "wss", Host: worker, Path: "/apiws", RawQuery: q.Encode()}
+	if noSecure {
+		u.Scheme = "ws"
+	}
 	dialer := websocket.Dialer{
 		HandshakeTimeout: timeout,
 		Subprotocols:     []string{"binary"},
@@ -482,6 +488,10 @@ func cfproxyFallback(label string, cfg *Config, dc int, isMedia bool, client net
 	if isMedia {
 		mediaTag = " media"
 	}
+	scheme := "wss"
+	if cfg.NoSecure {
+		scheme = "ws"
+	}
 
 	attempts := 0
 	for _, baseDomain := range cfg.cfproxyDomainsForTry(dc) {
@@ -496,9 +506,9 @@ func cfproxyFallback(label string, cfg *Config, dc int, isMedia bool, client net
 		}
 		attempts++
 		domain := fmt.Sprintf("kws%d.%s", dc, baseDomain)
-		debugf(cfg, "[%s] DC%d%s -> CF proxy wss://%s/apiws", label, dc, mediaTag, domain)
+		debugf(cfg, "[%s] DC%d%s -> CF proxy %s://%s/apiws", label, dc, mediaTag, scheme, domain)
 		dialStart := time.Now()
-		ws, resp, err := dialWSByDomain(cfg.context(), domain, wsConnectTimeout)
+		ws, resp, err := dialWSByDomain(cfg.context(), domain, cfg.NoSecure, wsConnectTimeout)
 		debugWSDial(cfg, fmt.Sprintf("[%s] DC%d%s CF %s", label, dc, mediaTag, domain), resp, err, time.Since(dialStart))
 		if err != nil {
 			atomic.AddInt64(&stats.wsErrors, 1)

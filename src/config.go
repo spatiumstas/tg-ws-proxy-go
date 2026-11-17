@@ -32,6 +32,7 @@ func parseFlags(args []string) (*Config, error) {
 	cfproxyDomains := fs.String("cfproxy-domains", "", "Comma-separated Cloudflare proxy domain pool for WS fallback")
 	cfproxyWorkerDomains := fs.String("cfproxy-worker-domain", "", "Comma-separated Cloudflare Worker domain(s) for WS fallback (e.g. name-1234.user.workers.dev); tried first when set")
 	noCfproxy := fs.Bool("no-cfproxy", false, "Disable Cloudflare proxy fallback")
+	noSecure := fs.Bool("no-secure", false, "Disable TLS for Cloudflare proxy and Worker WebSockets (ws:// on port 80)")
 	cfproxyPriority := fs.Bool("cfproxy-priority", true, "Try cfproxy before TCP fallback")
 	noCfproxyDomainRefresh := fs.Bool("no-cfproxy-domain-refresh", false, "Disable periodic CF proxy domain refresh from URL")
 	cfproxyDomainsURL := fs.String("cfproxy-domains-url", defaultCFProxyDomainsURL, "URL to fetch CF proxy domain list from")
@@ -42,8 +43,10 @@ func parseFlags(args []string) (*Config, error) {
 
 	var dcIPs multiFlag
 	var dcIPPools multiFlag
+	var noDCIPs multiFlag
 	fs.Var(&dcIPs, "dc-ip", "Target DC IP as DC:IP; repeatable")
 	fs.Var(&dcIPPools, "dc-ip-pool", "Target pool as DC:IP1,IP2,...; repeatable")
+	fs.Var(&noDCIPs, "no-dc-ip", "Disable direct WS for a DC and use fallback; repeatable, overrides --dc-ip and --dc-ip-pool")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
@@ -127,6 +130,15 @@ func parseFlags(args []string) (*Config, error) {
 		dcMap[dc] = dcPool[dc][0]
 	}
 
+	for _, item := range noDCIPs {
+		dc, err := strconv.Atoi(item)
+		if err != nil || dc <= 0 {
+			return nil, fmt.Errorf("invalid --no-dc-ip: %s (expected a positive DC number)", item)
+		}
+		delete(dcPool, dc)
+		delete(dcMap, dc)
+	}
+
 	userDomainProvided := provided["cfproxy-domain"]
 	userPoolProvided := strings.TrimSpace(*cfproxyDomains) != ""
 	userDomain := normalizeCFProxyDomain(*cfproxyDomain)
@@ -180,6 +192,7 @@ func parseFlags(args []string) (*Config, error) {
 		DCMap:                        dcMap,
 		DCPool:                       dcPool,
 		FallbackCFProxy:              !*noCfproxy,
+		NoSecure:                     *noSecure,
 		FallbackCFProxyPriority:      *cfproxyPriority,
 		FallbackCFProxyDomain:        "",
 		FallbackCFProxyUserDomain:    userFixedDomain || userPoolProvided,

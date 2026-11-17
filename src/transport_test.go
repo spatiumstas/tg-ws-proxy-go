@@ -72,3 +72,67 @@ func TestWSConnectStopsOnRouteFailure(t *testing.T) {
 		})
 	}
 }
+
+func TestCFWebSocketsNoSecure(t *testing.T) {
+	for _, worker := range []bool{false, true} {
+		for _, noSecure := range []bool{false, true} {
+			name := "CF proxy"
+			if worker {
+				name = "Worker"
+			}
+			if noSecure {
+				name += "/ws"
+			} else {
+				name += "/wss"
+			}
+			t.Run(name, func(t *testing.T) {
+				upgrader := websocket.Upgrader{
+					Subprotocols: []string{"binary"},
+					CheckOrigin:  func(r *http.Request) bool { return r.Header.Get("Origin") == "https://web.telegram.org" },
+				}
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.TLS != nil || r.URL.Path != "/apiws" || r.Header.Get("Origin") != "https://web.telegram.org" {
+						t.Errorf("unexpected request: %s, TLS=%t, Origin=%s", r.URL, r.TLS != nil, r.Header.Get("Origin"))
+					}
+					if worker && (r.URL.Query().Get("dst") != "192.0.2.5" || r.URL.Query().Get("dc") != "5") {
+						t.Errorf("wrong worker route: %s", r.URL)
+					}
+					conn, err := upgrader.Upgrade(w, r, nil)
+					if err != nil {
+						t.Error(err)
+						return
+					}
+					defer conn.Close()
+					_ = conn.WriteMessage(websocket.BinaryMessage, []byte("connected"))
+				}))
+				defer srv.Close()
+				domain := strings.TrimPrefix(srv.URL, "http://")
+				var conn *websocket.Conn
+				var err error
+				if worker {
+					cfg := &Config{NoSecure: noSecure, FallbackCFProxyWorkerDomains: []string{domain}}
+					conn, _, err = connectWorker(context.Background(), cfg, 5, "192.0.2.5", nil)
+				} else {
+					conn, _, err = dialWSByDomain(context.Background(), domain, noSecure, time.Second)
+				}
+				if conn != nil {
+					defer conn.Close()
+				}
+				if !noSecure {
+					if err == nil {
+						t.Fatal("default TLS dial connected to a plaintext server")
+					}
+					return
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+				kind, data, err := conn.ReadMessage()
+				if err != nil || kind != websocket.BinaryMessage || string(data) != "connected" || conn.Subprotocol() != "binary" {
+					t.Fatalf("WebSocket exchange: kind=%d data=%q subprotocol=%q err=%v", kind, data, conn.Subprotocol(), err)
+				}
+			})
+		}
+	}
+}

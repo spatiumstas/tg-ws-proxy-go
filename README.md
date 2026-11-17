@@ -41,6 +41,7 @@ DC_IP_DEFAULT_POOL=""
 FAKE_TLS_DOMAIN=""
 CFPROXY_DOMAINS=""
 CFPROXY_DOMAINS_URL="https://raw.githubusercontent.com/Flowseal/tg-ws-proxy/main/.github/cfproxy-domains.txt"
+CFPROXY_WORKER_DOMAINS=""
 EXTRA_ARGS=""
 
 # secret.conf
@@ -56,6 +57,8 @@ SECRET=
 5. `FAKE_TLS_DOMAIN` включает режим Fake TLS (`ee` secret link). Оставьте пустым для стандартного режима `dd`. Перед запуском приёма соединений прокси измеряет размер первой зашифрованной TLS-записи этого домена на порту 443 (таймаут 5 секунд). Если профиль недоступен, используются случайные размеры 64–160 байт.
 6. `CFPROXY_DOMAINS` — локальный список fallback-доменов.
 7. `CFPROXY_DOMAINS_URL` — [значение по умолчанию](https://raw.githubusercontent.com/Flowseal/tg-ws-proxy/main/.github/cfproxy-domains.txt)/[зеркало](https://raw.githubusercontent.com/spatiumstas/tg-ws-proxy-go/main-go/.github/cfproxy-domains.txt)
+8. `CFPROXY_WORKER_DOMAINS` — домены своих Cloudflare Worker через запятую; в fallback они пробуются перед CF-прокси и TCP. [Настройка Worker](https://github.com/Flowseal/tg-ws-proxy/blob/main/docs/RU/CfWorker.md).
+9. `--no-dc-ip DC` отключает прямой WS для указанного DC и переводит его на fallback. Флаг можно повторять; он имеет приоритет над `--dc-ip` и `--dc-ip-pool` независимо от порядка аргументов. Размер пула и прогрев Worker сохраняются.
 
 Примеры переопределений:
 
@@ -66,8 +69,20 @@ EXTRA_ARGS="--dc-ip-pool 2:149.154.175.50,149.154.167.220"
 # Переопределение одним IP для отдельного DC (DC203) + логи
 EXTRA_ARGS="--dc-ip 203:91.105.192.100 -v"
 
+# Оставить прямой WS только для DC4 из стандартных DC2 и DC4
+EXTRA_ARGS="--no-dc-ip 2"
+
+# Отключить оба стандартных прямых маршрута и использовать fallback
+EXTRA_ARGS="--no-dc-ip 2 --no-dc-ip 4"
+
+# Свой Cloudflare Worker (домен без https:// и пути)
+CFPROXY_WORKER_DOMAINS="random.username.workers.dev"
+
 # Режим Fake TLS (ee-secret)
 FAKE_TLS_DOMAIN="example.com"
+
+# Отключить TLS для CF-прокси и CF-worker (ws://, порт 80)
+EXTRA_ARGS="--no-secure"
 ```
 
 ### Запуск
