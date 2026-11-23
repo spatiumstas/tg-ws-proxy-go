@@ -41,6 +41,8 @@ type Config struct {
 	cfproxyMu                    sync.RWMutex
 	cfproxyFailUntil             map[string]time.Time
 	cfworkerFailUntil            map[string]time.Time
+	cfworkerRateLimitUntil       map[string]time.Time
+	fallbackTimeoutUntil         map[fallbackModeKey]time.Time
 	fallbackDials                map[fallbackDialKey]int
 }
 
@@ -54,6 +56,11 @@ func (cfg *Config) context() context.Context {
 type fallbackDialKey struct {
 	domain string
 	worker bool
+}
+
+type fallbackModeKey struct {
+	fallbackDialKey
+	noSecure bool
 }
 
 type Stats struct {

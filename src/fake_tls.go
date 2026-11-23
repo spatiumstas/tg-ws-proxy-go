@@ -1,6 +1,7 @@
 package main
 
 import (
+	"container/list"
 	"context"
 	"crypto/ecdh"
 	"crypto/hmac"
@@ -13,6 +14,7 @@ import (
 	"log"
 	"math/big"
 	"net"
+	"sync"
 	"time"
 )
 
@@ -29,9 +31,53 @@ const (
 	tlsTimestampTolerance  = 120
 	tlsGroupX25519         = 0x001d
 	tlsGroupX25519MLKEM768 = 0x11ec
+	fakeTLSReplayCacheSize = 65536
 )
 
 var fakeTLSCCSFrame = []byte{0x14, 0x03, 0x03, 0x00, 0x01, 0x01}
+
+// Only authenticated hellos enter this bounded process-wide cache.
+var fakeTLSReplays fakeTLSReplayCache
+
+type fakeTLSReplayEntry struct {
+	random [tlsClientRandomLen]byte
+	until  time.Time
+}
+
+type fakeTLSReplayCache struct {
+	mu      sync.Mutex
+	entries map[[tlsClientRandomLen]byte]struct{}
+	order   list.List
+}
+
+func (c *fakeTLSReplayCache) firstSeen(random [tlsClientRandomLen]byte, now time.Time) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for c.order.Len() > 0 {
+		oldest := c.order.Front()
+		if now.Before(oldest.Value.(fakeTLSReplayEntry).until) {
+			break
+		}
+		delete(c.entries, oldest.Value.(fakeTLSReplayEntry).random)
+		c.order.Remove(oldest)
+	}
+	if _, seen := c.entries[random]; seen {
+		return false
+	}
+	if c.order.Len() == fakeTLSReplayCacheSize {
+		oldest := c.order.Front()
+		delete(c.entries, oldest.Value.(fakeTLSReplayEntry).random)
+		c.order.Remove(oldest)
+	}
+	if c.entries == nil {
+		c.entries = make(map[[tlsClientRandomLen]byte]struct{})
+	}
+	// Cover both sides of the timestamp tolerance and its whole-second rounding.
+	until := now.Add((2*tlsTimestampTolerance + 1) * time.Second)
+	c.order.PushBack(fakeTLSReplayEntry{random: random, until: until})
+	c.entries[random] = struct{}{}
+	return true
+}
 
 type fakeTLSClientHelloInfo struct {
 	cipherSuites []uint16
@@ -82,7 +128,7 @@ func acceptFakeTLSClient(ctx context.Context, client net.Conn, secret []byte, ma
 	clientHello := append(tlsHeader, recordBody...)
 
 	clientRandom, sessionID, ok := verifyFakeTLSClientHello(clientHello, secret)
-	if !ok {
+	if !ok || !fakeTLSReplays.firstSeen([tlsClientRandomLen]byte(clientRandom), time.Now()) {
 		log.Printf("INFO   [%s] Fake TLS verify failed -> masking", label)
 		proxyToMaskingDomain(ctx, client, clientHello, maskingDomain, label)
 		return nil, nil, false

@@ -63,3 +63,52 @@ func TestPoolFallbackDoesNotWaitForDirectDial(t *testing.T) {
 		})
 	}
 }
+
+func TestClientDisconnectCancelsFallbackSetup(t *testing.T) {
+	for _, worker := range []bool{false, true} {
+		t.Run(map[bool]string{false: "TCP", true: "Worker"}[worker], func(t *testing.T) {
+			oldPool, oldTCP, oldWorker := pool, tcpFallbackDial, workerDial
+			p := newWSPool()
+			pool = p
+			defer func() { p.Close(); pool, tcpFallbackDial, workerDial = oldPool, oldTCP, oldWorker }()
+			address := net.JoinHostPort(fallbackIP(2), "443")
+			defer func() { tcpAttempts.mu.Lock(); delete(tcpAttempts.routes, address); tcpAttempts.mu.Unlock() }()
+			started := make(chan struct{})
+			cfg := &Config{}
+			if worker {
+				cfg.FallbackCFProxyWorkerDomains = []string{"worker.test"}
+				workerDial = func(ctx context.Context, _, _ string, _ int, _ bool, _ time.Duration) (*websocket.Conn, *http.Response, error) {
+					close(started)
+					<-ctx.Done()
+					return nil, nil, ctx.Err()
+				}
+			} else {
+				tcpFallbackDial = func(ctx context.Context, _ string) (net.Conn, error) {
+					close(started)
+					<-ctx.Done()
+					return nil, ctx.Err()
+				}
+			}
+			client, peer := net.Pipe()
+			defer client.Close()
+			defer peer.Close()
+			hi := &handshakeInfo{DC: 2, ProtoTag: protoTagIntermediate, ClientDecI: make([]byte, prekeyLen+ivLen)}
+			done := make(chan struct{})
+			go func() { defer close(done); handleMTProtoClient(client, cfg, hi, make([]byte, 16), "disconnect") }()
+			select {
+			case <-started:
+			case <-time.After(time.Second):
+				t.Fatal("upstream dial did not start")
+			}
+			_ = peer.Close()
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("client disconnect left upstream dial running")
+			}
+			if len(cfg.cfworkerFailUntil) != 0 || len(cfg.fallbackTimeoutUntil) != 0 || len(cfg.fallbackDials) != 0 {
+				t.Fatal("client cancellation cooled down a route or leaked a reservation")
+			}
+		})
+	}
+}

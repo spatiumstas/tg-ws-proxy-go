@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -124,7 +125,12 @@ func connectWorker(ctx context.Context, cfg *Config, dc int, dst string, relayIn
 		if !cfg.beginFallbackDial(domain, true) {
 			continue
 		}
-		conn, _, err := workerDial(ctx, domain, dst, dc, cfg.NoSecure, wsConnectTimeout)
+		conn, resp, err := dialFallbackWS(ctx, cfg, domain, true, func(noSecure bool) (*websocket.Conn, *http.Response, error) {
+			return workerDial(ctx, domain, dst, dc, noSecure, wsConnectTimeout)
+		})
+		if err != nil && resp != nil && resp.StatusCode == http.StatusTooManyRequests {
+			err = &workerRateLimitError{error: err, until: workerRateLimitDeadline(resp, time.Now())}
+		}
 		if err == nil && relayInit != nil {
 			stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
 			err = writeWSBinary(conn, relayInit)

@@ -221,6 +221,7 @@ jobs:
         with:
           script: |
             const tag = process.env.RELEASE_TAG;
+            const name = `Release ${tag}`;
             const tagCommit = async (tag) => {
               const { data: ref } = await github.rest.git.getRef({ ...context.repo, ref: `tags/${tag}` });
               let object = ref.object;
@@ -239,9 +240,10 @@ jobs:
             let release;
             try {
               ({ data: release } = await github.rest.repos.getReleaseByTag({ ...context.repo, tag }));
+              await github.rest.repos.updateRelease({ ...context.repo, release_id: release.id, name });
             } catch (error) {
               if (error.status !== 404) throw error;
-              ({ data: release } = await github.rest.repos.createRelease({ ...context.repo, tag_name: tag, name: tag, draft: true }));
+              ({ data: release } = await github.rest.repos.createRelease({ ...context.repo, tag_name: tag, name, draft: true }));
             }
             core.setOutput('id', release.id);
             core.setOutput('draft', release.draft);

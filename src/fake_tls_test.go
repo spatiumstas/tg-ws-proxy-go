@@ -284,6 +284,9 @@ func TestFakeTLSAppDataSizes(t *testing.T) {
 func TestAcceptFakeTLSClientNegotiation(t *testing.T) {
 	secret := bytes.Repeat([]byte{1}, 16)
 	hello := fakeTLSClientHelloForTest([]uint16{0x1303}, map[uint16]int{tlsGroupX25519MLKEM768: 1216})
+	if _, err := rand.Read(hello[44:76]); err != nil {
+		t.Fatal(err)
+	}
 	digest := hmacSHA256(secret, hello)
 	copy(hello[11:43], digest)
 	timestamp := uint32(time.Now().Unix())
@@ -322,6 +325,24 @@ func TestAcceptFakeTLSClientNegotiation(t *testing.T) {
 	}
 	if !<-done {
 		t.Fatal("authenticated Fake TLS connection did not deliver MTProto handshake")
+	}
+	for range 2 {
+		server, probe := net.Pipe()
+		_ = probe.SetDeadline(time.Now().Add(time.Second))
+		rejected := make(chan bool, 1)
+		go func() {
+			defer server.Close()
+			_, _, ok := acceptFakeTLSClient(context.Background(), server, secret, "invalid\x00domain", 3000, "replay")
+			rejected <- !ok
+		}()
+		if _, err := probe.Write(hello); err != nil {
+			t.Fatal(err)
+		}
+		_, err := probe.Read(make([]byte, 1))
+		_ = probe.Close()
+		if err != io.EOF || !<-rejected {
+			t.Fatalf("replayed ClientHello received a Fake TLS response: %v", err)
+		}
 	}
 }
 

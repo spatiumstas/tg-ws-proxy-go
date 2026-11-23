@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/cipher"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -452,7 +453,57 @@ func dialWSWorker(ctx context.Context, worker, dst string, dc int, noSecure bool
 	return dialWebSocket(ctx, &dialer, u.String(), headers)
 }
 
-func cfWorkerFallback(label string, cfg *Config, dc int, isMedia bool, dst string, client net.Conn, relayInit []byte, cltDec, cltEnc, tgEnc, tgDec cipher.Stream) error {
+var errFallbackCooldown = errors.New("CF transports are cooling down")
+
+func dialFallbackWS(ctx context.Context, cfg *Config, domain string, worker bool, dial func(bool) (*websocket.Conn, *http.Response, error)) (*websocket.Conn, *http.Response, error) {
+	var lastResp *http.Response
+	var lastErr error = errFallbackCooldown
+	for _, noSecure := range []bool{false, true} {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, context.Canceled
+		}
+		if cfg.NoSecure && !noSecure {
+			continue
+		}
+		key := fallbackModeKey{fallbackDialKey: fallbackDialKey{domain: domain, worker: worker}, noSecure: noSecure}
+		cfg.cfproxyMu.RLock()
+		until := cfg.fallbackTimeoutUntil[key]
+		cfg.cfproxyMu.RUnlock()
+		if time.Now().Before(until) {
+			continue
+		}
+		conn, resp, err := dial(noSecure)
+		if ctx.Err() != nil {
+			if conn != nil {
+				_ = conn.Close()
+			}
+			return nil, nil, context.Canceled
+		}
+		if err == nil {
+			return conn, resp, nil
+		}
+		if conn != nil {
+			_ = conn.Close()
+		}
+		lastResp, lastErr = resp, err
+		if !isTimeoutError(err) {
+			return nil, resp, err
+		}
+		cfg.cfproxyMu.Lock()
+		if cfg.fallbackTimeoutUntil == nil {
+			cfg.fallbackTimeoutUntil = make(map[fallbackModeKey]time.Time)
+		}
+		cfg.fallbackTimeoutUntil[key] = time.Now().Add(cfproxyFailureCooldown(err))
+		cfg.cfproxyMu.Unlock()
+		lastErr = fmt.Errorf("%w: %w", errFallbackCooldown, err)
+		if !noSecure && !cfg.NoSecure {
+			logf("INFO   CF %s WSS timed out; trying WS over HTTP", domain)
+		}
+	}
+	return nil, lastResp, lastErr
+}
+
+func cfWorkerFallback(ctx context.Context, label string, cfg *Config, dc int, isMedia bool, dst string, client net.Conn, relayInit []byte, cltDec, cltEnc, tgEnc, tgDec cipher.Stream) error {
 	if dst == "" {
 		return errNoDomains
 	}
@@ -462,7 +513,7 @@ func cfWorkerFallback(label string, cfg *Config, dc int, isMedia bool, dst strin
 	if ok {
 		ws = item.conn
 		debugf(cfg, "[%s] DC%d Worker pool hit via %s", label, dc, item.domain)
-		stop := context.AfterFunc(cfg.context(), func() { _ = item.conn.Close() })
+		stop := context.AfterFunc(ctx, func() { _ = item.conn.Close() })
 		err := writeWSBinary(ws, relayInit)
 		stop()
 		if err != nil {
@@ -471,7 +522,7 @@ func cfWorkerFallback(label string, cfg *Config, dc int, isMedia bool, dst strin
 		}
 	}
 	if ws == nil {
-		conn, _, err := connectWorker(cfg.context(), cfg, dc, dst, relayInit)
+		conn, _, err := connectWorker(ctx, cfg, dc, dst, relayInit)
 		if err != nil {
 			return err
 		}
@@ -483,19 +534,14 @@ func cfWorkerFallback(label string, cfg *Config, dc int, isMedia bool, dst strin
 	return nil
 }
 
-func cfproxyFallback(label string, cfg *Config, dc int, isMedia bool, client net.Conn, relayInit []byte, cltDec, cltEnc, tgEnc, tgDec cipher.Stream, splitter *msgSplitter) error {
+func cfproxyFallback(ctx context.Context, label string, cfg *Config, dc int, isMedia bool, client net.Conn, relayInit []byte, cltDec, cltEnc, tgEnc, tgDec cipher.Stream, splitter *msgSplitter) error {
 	mediaTag := ""
 	if isMedia {
 		mediaTag = " media"
 	}
-	scheme := "wss"
-	if cfg.NoSecure {
-		scheme = "ws"
-	}
-
 	attempts := 0
 	for _, baseDomain := range cfg.cfproxyDomainsForTry(dc) {
-		if err := cfg.context().Err(); err != nil {
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if attempts == cfProxyMaxAttempts {
@@ -506,9 +552,15 @@ func cfproxyFallback(label string, cfg *Config, dc int, isMedia bool, client net
 		}
 		attempts++
 		domain := fmt.Sprintf("kws%d.%s", dc, baseDomain)
-		debugf(cfg, "[%s] DC%d%s -> CF proxy %s://%s/apiws", label, dc, mediaTag, scheme, domain)
 		dialStart := time.Now()
-		ws, resp, err := dialWSByDomain(cfg.context(), domain, cfg.NoSecure, wsConnectTimeout)
+		ws, resp, err := dialFallbackWS(ctx, cfg, baseDomain, false, func(noSecure bool) (*websocket.Conn, *http.Response, error) {
+			scheme := "wss"
+			if noSecure {
+				scheme = "ws"
+			}
+			debugf(cfg, "[%s] DC%d%s -> CF proxy %s://%s/apiws", label, dc, mediaTag, scheme, domain)
+			return dialWSByDomain(ctx, domain, noSecure, wsConnectTimeout)
+		})
 		debugWSDial(cfg, fmt.Sprintf("[%s] DC%d%s CF %s", label, dc, mediaTag, domain), resp, err, time.Since(dialStart))
 		if err != nil {
 			atomic.AddInt64(&stats.wsErrors, 1)
@@ -523,10 +575,10 @@ func cfproxyFallback(label string, cfg *Config, dc int, isMedia bool, client net
 			continue
 		}
 
-		stop := context.AfterFunc(cfg.context(), func() { _ = ws.Close() })
+		stop := context.AfterFunc(ctx, func() { _ = ws.Close() })
 		err = writeWSBinary(ws, relayInit)
 		stop()
-		if cfg.context().Err() != nil {
+		if ctx.Err() != nil {
 			err = context.Canceled
 		}
 		if err != nil {

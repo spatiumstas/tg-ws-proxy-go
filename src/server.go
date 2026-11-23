@@ -253,6 +253,8 @@ func handleMTProtoClient(client net.Conn, cfg *Config, hi *handshakeInfo, secret
 	}
 
 	newFallbackSplitter := func() *msgSplitter { return &msgSplitter{proto: protoInt} }
+	ctx, client := watchClient(cfg.context(), client)
+	defer client.Close()
 
 	doFallback := func(primaryTarget string) {
 		fallback := fallbackIP(hi.DC)
@@ -262,7 +264,7 @@ func handleMTProtoClient(client net.Conn, cfg *Config, hi *handshakeInfo, secret
 
 		useWorker := cfg.hasCFProxyWorkerDomains()
 		tryWorker := func() bool {
-			if err := cfWorkerFallback(label, cfg, hi.DC, hi.IsMedia, fallback, client, relayInit, cltDec, cltEnc, tgEnc, tgDec); err == nil {
+			if err := cfWorkerFallback(ctx, label, cfg, hi.DC, hi.IsMedia, fallback, client, relayInit, cltDec, cltEnc, tgEnc, tgDec); err == nil {
 				log.Printf("INFO   [%s] DC%d%s CF worker fallback closed", label, hi.DC, mediaTag)
 				return true
 			}
@@ -272,7 +274,7 @@ func handleMTProtoClient(client net.Conn, cfg *Config, hi *handshakeInfo, secret
 		useCF := cfg.FallbackCFProxy && cfg.hasCFProxyDomains()
 		tryCF := func() bool {
 			splitter := newFallbackSplitter()
-			if err := cfproxyFallback(label, cfg, hi.DC, hi.IsMedia, client, relayInit, cltDec, cltEnc, tgEnc, tgDec, splitter); err == nil {
+			if err := cfproxyFallback(ctx, label, cfg, hi.DC, hi.IsMedia, client, relayInit, cltDec, cltEnc, tgEnc, tgDec, splitter); err == nil {
 				log.Printf("INFO   [%s] DC%d%s CF proxy fallback closed", label, hi.DC, mediaTag)
 				return true
 			}
@@ -282,7 +284,7 @@ func handleMTProtoClient(client net.Conn, cfg *Config, hi *handshakeInfo, secret
 			if fallback == "" {
 				return false
 			}
-			err := tcpFallback(cfg.context(), client, fallback, relayInit, cltDec, cltEnc, tgEnc, tgDec)
+			err := tcpFallback(ctx, client, fallback, relayInit, cltDec, cltEnc, tgEnc, tgDec)
 			if err == nil {
 				log.Printf("INFO   [%s] DC%d%s TCP fallback closed", label, hi.DC, mediaTag)
 				return true
@@ -319,7 +321,7 @@ func handleMTProtoClient(client net.Conn, cfg *Config, hi *handshakeInfo, secret
 		doFallback(primaryTarget)
 		return
 	}
-	stop := context.AfterFunc(cfg.context(), func() { _ = ws.Close() })
+	stop := context.AfterFunc(ctx, func() { _ = ws.Close() })
 	err = writeWSBinary(ws, relayInit)
 	stop()
 	if err != nil {

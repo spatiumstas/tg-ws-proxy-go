@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -215,4 +216,56 @@ func containsCFProxyDomain(domains []string, wanted string) bool {
 		}
 	}
 	return false
+}
+
+func TestWorkerRateLimitDeadline(t *testing.T) {
+	now := time.Date(2026, 11, 23, 23, 30, 0, 0, time.FixedZone("MSK", 3*60*60))
+	midnight := time.Date(2026, 11, 24, 0, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		header string
+		want   time.Time
+	}{
+		{"", midnight},
+		{"invalid", midnight},
+		{"-1", midnight},
+		{"99999999999999999999999999", midnight},
+		{"120", now.Add(2 * time.Minute)},
+		{"0", now},
+		{now.Add(time.Hour).UTC().Format(http.TimeFormat), now.Add(time.Hour)},
+		{now.Add(-time.Hour).UTC().Format(http.TimeFormat), now},
+	} {
+		t.Run(tc.header, func(t *testing.T) {
+			resp := &http.Response{Header: http.Header{"Retry-After": []string{tc.header}}}
+			if got := workerRateLimitDeadline(resp, now); !got.Equal(tc.want) {
+				t.Fatalf("deadline = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWorkerRateLimitSurvivesParallelResults(t *testing.T) {
+	const domain = "worker.example"
+	cfg := &Config{FallbackCFProxyWorkerDomains: []string{domain}}
+	for range fallbackMaxDialsPerDomain {
+		if !cfg.beginFallbackDial(domain, true) {
+			t.Fatal("could not reserve concurrent dial")
+		}
+	}
+	until := time.Now().Add(12 * time.Hour)
+	if !cfg.finishFallbackDial(domain, true, &workerRateLimitError{error: errors.New("429"), until: until}) {
+		t.Fatal("429 did not start cooldown")
+	}
+	for _, err := range []error{nil, errors.New("503"), &workerRateLimitError{error: errors.New("429"), until: time.Now().Add(time.Minute)}} {
+		if cfg.finishFallbackDial(domain, true, err) || !cfg.cfworkerRateLimitUntil[domain].Equal(until) {
+			t.Fatal("a late dial result shortened the rate limit")
+		}
+	}
+	if cfg.beginFallbackDial(domain, true) || len(cfg.fallbackDials) != 0 {
+		t.Fatal("exhausted Worker accepted a dial or leaked reservations")
+	}
+	cfg.cfworkerRateLimitUntil[domain] = time.Now().Add(-time.Second)
+	if !cfg.beginFallbackDial(domain, true) {
+		t.Fatal("Worker did not recover after rate limit expired")
+	}
+	cfg.finishFallbackDial(domain, true, nil)
 }

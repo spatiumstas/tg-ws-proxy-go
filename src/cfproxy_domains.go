@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -326,15 +327,18 @@ func (cfg *Config) cfproxyDomainsForTry(dc int) []string {
 }
 
 func (cfg *Config) cfproxyDomainAvailableLocked(domain string, now time.Time) bool {
-	until, failed := cfg.cfproxyFailUntil[domain]
-	if !failed {
-		return true
-	}
-	if now.Before(until) {
+	if now.Before(cfg.cfproxyFailUntil[domain]) {
 		return false
 	}
 	delete(cfg.cfproxyFailUntil, domain)
-	return true
+	return cfg.fallbackTransportsAvailableLocked(fallbackDialKey{domain: domain}, now)
+}
+
+func (cfg *Config) fallbackTransportsAvailableLocked(key fallbackDialKey, now time.Time) bool {
+	if !now.Before(cfg.fallbackTimeoutUntil[fallbackModeKey{fallbackDialKey: key, noSecure: true}]) {
+		return true
+	}
+	return !cfg.NoSecure && !now.Before(cfg.fallbackTimeoutUntil[fallbackModeKey{fallbackDialKey: key}])
 }
 
 func (cfg *Config) beginFallbackDial(domain string, worker bool) bool {
@@ -352,7 +356,11 @@ func (cfg *Config) beginFallbackDial(domain string, worker bool) bool {
 		}
 	}
 	key := fallbackDialKey{domain: domain, worker: worker}
-	if !found || time.Now().Before(failures[domain]) || cfg.fallbackDials[key] >= fallbackMaxDialsPerDomain {
+	now := time.Now()
+	if !found || now.Before(failures[domain]) || worker && now.Before(cfg.cfworkerRateLimitUntil[domain]) || cfg.fallbackDials[key] >= fallbackMaxDialsPerDomain {
+		return false
+	}
+	if !cfg.fallbackTransportsAvailableLocked(key, now) {
 		return false
 	}
 	if cfg.fallbackDials == nil {
@@ -378,8 +386,28 @@ func (cfg *Config) finishFallbackDial(domain string, worker bool, err error) boo
 	if errors.Is(err, context.Canceled) {
 		return false
 	}
+	if worker {
+		var limited *workerRateLimitError
+		if errors.As(err, &limited) {
+			if !limited.until.After(cfg.cfworkerRateLimitUntil[domain]) {
+				return false
+			}
+			if cfg.cfworkerRateLimitUntil == nil {
+				cfg.cfworkerRateLimitUntil = make(map[string]time.Time)
+			}
+			cfg.cfworkerRateLimitUntil[domain] = limited.until
+			return true
+		}
+		if time.Now().Before(cfg.cfworkerRateLimitUntil[domain]) {
+			return false
+		}
+		delete(cfg.cfworkerRateLimitUntil, domain)
+	}
 	if err == nil {
 		delete(*failures, domain)
+		return false
+	}
+	if errors.Is(err, errFallbackCooldown) {
 		return false
 	}
 	if time.Now().Before((*failures)[domain]) {
@@ -419,6 +447,32 @@ func cfproxyFailureCooldown(err error) time.Duration {
 	return cfProxyFailCooldown
 }
 
+type workerRateLimitError struct {
+	error
+	until time.Time
+}
+
+func (e *workerRateLimitError) Error() string {
+	return fmt.Sprintf("HTTP 429; cooling down until %s: %v", e.until.UTC().Format(time.RFC3339), e.error)
+}
+
+func (e *workerRateLimitError) Unwrap() error { return e.error }
+
+func workerRateLimitDeadline(resp *http.Response, now time.Time) time.Time {
+	retryAfter := strings.TrimSpace(resp.Header.Get("Retry-After"))
+	if seconds, err := strconv.ParseUint(retryAfter, 10, 32); err == nil {
+		return now.Add(time.Duration(seconds) * time.Second)
+	}
+	if until, err := http.ParseTime(retryAfter); err == nil {
+		if until.Before(now) {
+			return now
+		}
+		return until
+	}
+	// Workers free-plan daily quotas reset at midnight UTC.
+	return now.UTC().Truncate(24 * time.Hour).Add(24 * time.Hour)
+}
+
 func (cfg *Config) setCFProxyDomains(domains []string) {
 	pool := make([]string, 0, len(domains))
 	pool = appendUniqueDomains(pool, domains...)
@@ -443,6 +497,21 @@ func (cfg *Config) setCFProxyDomains(domains []string) {
 		}
 		if !found {
 			delete(cfg.cfproxyFailUntil, domain)
+		}
+	}
+	for key := range cfg.fallbackTimeoutUntil {
+		if key.worker {
+			continue
+		}
+		found := false
+		for _, domain := range pool {
+			if key.domain == domain {
+				found = true
+				break
+			}
+		}
+		if !found {
+			delete(cfg.fallbackTimeoutUntil, key)
 		}
 	}
 	if cfg.FallbackCFProxyPerDCActive == nil {

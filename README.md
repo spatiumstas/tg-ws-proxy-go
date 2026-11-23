@@ -52,13 +52,17 @@ SECRET=
 
 1. `SECRET` должен быть строкой из 32 hex-символов. Если оставить пустым, он будет автоматически сгенерирован при запуске.
 2. `DC_IP_DEFAULT` и `DC_IP_DEFAULT_POOL` — глобальные значения по умолчанию для DC (`2,4`).
-3. `EXTRA_ARGS` используется для переопределений по DC и дополнительных флагов, см. [CFProxy](https://github.com/Flowseal/tg-ws-proxy/blob/main/docs/CfProxy.md).
+3. `EXTRA_ARGS` используется для переопределений по DC и дополнительных флагов, см. [CFProxy](https://github.com/Flowseal/tg-ws-proxy/blob/main/docs/RU/CfProxy.md).
 4. Полный список доступных команд: `--help`.
 5. `FAKE_TLS_DOMAIN` включает режим Fake TLS (`ee` secret link). Оставьте пустым для стандартного режима `dd`. Перед запуском приёма соединений прокси измеряет размер первой зашифрованной TLS-записи этого домена на порту 443 (таймаут 5 секунд). Если профиль недоступен, используются случайные размеры 64–160 байт.
 6. `CFPROXY_DOMAINS` — локальный список fallback-доменов.
 7. `CFPROXY_DOMAINS_URL` — [значение по умолчанию](https://raw.githubusercontent.com/Flowseal/tg-ws-proxy/main/.github/cfproxy-domains.txt)/[зеркало](https://raw.githubusercontent.com/spatiumstas/tg-ws-proxy-go/main-go/.github/cfproxy-domains.txt)
 8. `CFPROXY_WORKER_DOMAINS` — домены своих Cloudflare Worker через запятую; в fallback они пробуются перед CF-прокси и TCP. [Настройка Worker](https://github.com/Flowseal/tg-ws-proxy/blob/main/docs/RU/CfWorker.md).
 9. `--no-dc-ip DC` отключает прямой WS для указанного DC и переводит его на fallback. Флаг можно повторять; он имеет приоритет над `--dc-ip` и `--dc-ip-pool` независимо от порядка аргументов. Размер пула и прогрев Worker сохраняются.
+
+10. При таймауте WSS CF-прокси и Worker автоматически пробуют `ws://` (HTTP, порт 80). Для каждого транспорта действует отдельная пауза, после которой WSS снова доступен для проверки. Ошибки сертификата и HTTP-ответы не вызывают переход на WS. При WS HTTP/WS-заголовки передаются без TLS-обёртки. `--no-secure` по-прежнему принудительно выбирает WS.
+11. Worker с ответом HTTP 429 исключается до времени из `Retry-After`; если заголовок отсутствует или некорректен — до следующих суток UTC. Пауза общая для всех DC и прогрева пула.
+12. Fake TLS запоминает принятые ClientHello на 241 секунду (до 65536 записей); повтор отправляется на домен маскировки.
 
 Примеры переопределений:
 
